@@ -46,7 +46,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     return /^\d+(\.\d{1,2})?$/.test(s) ? money(Number(s)) : null;
   }
   // Collect bounded candidates. Do not enter recommendations or multi-SKU lists.
-  function extract(root, platform) {
+  function extract(root, platform, initialDepth) {
     const found = {};
     let visited = 0;
     const productIds = new Set();
@@ -93,11 +93,101 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
         walk(node[key], depth + 1, path ? path + "." + key : key);
       }
     }
-    walk(root, 0, "");
+    walk(root, initialDepth || 0, "");
     if (platform === "jd" && productIds.size > 1) return null;
     const out = { platform };
     for (const field of Object.keys(aliases)) out[field] = found[field] ? found[field].value : null;
     return out;
+  }
+  function parseBody(body) {
+    const raw = String(body || "").trim();
+    const match = raw.match(/^[A-Za-z_$][\w$]*\s*\(([\s\S]*)\)\s*;?$/);
+    return JSON.parse(match ? match[1] : raw);
+  }
+  function jdDetail(root) {
+    if (!root || !Array.isArray(root.floors)) return extract(root, "jd");
+    const candidates = [];
+    for (const floor of root.floors.slice(0, 100)) {
+      const d = floor && floor.data;
+      if (!d) continue;
+      const share = d.property && typeof d.property.shareUrl === "string" ? d.property.shareUrl.match(/(?:\/product\/|item\.jd\.com\/)(\d+)\.html/) : null;
+      const sku = d.wareInfo && /^\d+$/.test(String(d.wareInfo.skuId)) ? String(d.wareInfo.skuId) : null;
+      if (share && sku && share[1] !== sku) continue;
+      const match = share || (sku ? [null, sku] : null);
+      const price = d.priceInfo && money(d.priceInfo.jprice);
+      if (!match || !price) continue;
+      const result = extract(d, "jd", 2);
+      if (!result) continue;
+      if (result.item_id && result.item_id !== match[1]) continue;
+      const title = result.title || text(d.wareInfo && (d.wareInfo.wname || d.wareInfo.wareName), 160) || "京东商品 " + match[1];
+      candidates.push({ ...result, platform: "jd", item_id: match[1], sku_id: match[1], title, price,
+        price_source: "京东商品详情接口", price_condition: result.price_condition || null, account_price_observed: true });
+    }
+    const ids = new Set(candidates.map(p => p.item_id));
+    const prices = new Set(candidates.map(p => p.price));
+    return ids.size === 1 && prices.size === 1 ? candidates[0] : null;
+  }
+  function taobaoDetail(root) {
+    const d = root && root.data;
+    const item = d && d.item;
+    if (!item || !/^\d+$/.test(String(item.itemId)) || !text(item.title)) return null;
+    const states = [d];
+    if (Array.isArray(d.apiStack)) {
+      for (const entry of d.apiStack.slice(0, 8)) {
+        try {
+          const value = typeof entry.value === "string" ? JSON.parse(entry.value) : entry.value;
+          states.push(value && value.global && value.global.data ? value.global.data : value);
+        } catch (_) {}
+      }
+    }
+    for (const value of states) {
+      if (!value || typeof value !== "object") continue;
+      // Item-level numeric display price, never select a random variant from sku2info.
+      const info = value.price && value.price.price;
+      const price = info && money(info.priceText);
+      if (!price) continue; // A range such as 10-20 is not a specific price.
+      return { platform: "taobao", item_id: String(item.itemId), sku_id: null, title: text(item.title, 160), price,
+        original_price: null, promotion: null, specification: "未选择规格", price_condition: null,
+        price_source: "淘宝详情展示价（未选规格）", account_price_observed: true, item_level: true };
+    }
+    return null;
+  }
+  function jdHtml(html, id) {
+    // Parse only a known JSON object assignment; never evaluate HTML JavaScript.
+    const match = String(html).match(/window\._itemOnly\s*=\s*\(\s*([\s\S]*?)\s*\);/);
+    if (!match) return null;
+    try {
+      const item = JSON.parse(match[1]).item;
+      if (!item || String(item.skuId) !== id) return null;
+      return { title: text(item.skuName, 160), platform: "jd", item_id: id, sku_id: id };
+    } catch (_) { return null; }
+  }
+  function readableAnswers(a, finalAction, constrained) {
+    const labels = { buy: "考虑购买", wait: "建议等待", skip: "建议跳过", unsure: "信息不足" };
+    const score = a.discount_score.score;
+    const grade = score < 1 ? "优惠依据很弱" : score < 2 ? "优惠依据较弱" : score < 3 ? "优惠依据有限" : score < 4 ? "有一定优惠依据" : "优惠依据较充分";
+    const raw = labels[a.action.choice];
+    return ["Jev：" + labels[finalAction] + " · 证据 " + score.toFixed(1) + "/5 · 模型把握 " + Math.round(a.action.confidence * 100) + "%",
+      "解读：模型" + raw + "；" + grade + "，非质量评分。",
+      "抬价估计 " + Math.round(a.inflated.noul * 100) + "%（缺走势，未核实）" + (constrained ? "；依据不足，最终信息不足。" : "。")];
+  }
+  function priceSummary(external) {
+    if (!external) return [];
+    const get = name => external.entries.find(r => r.label === name);
+    const show = (label, row, date) => label + " ¥" + row.price.toFixed(2) + (date && row.date ? " · " + row.date.replace(/\//g, "-") : "");
+    const lines = [];
+    const low = get("历史最低价"), recent = get("30天最低价");
+    if (low) lines.push(show("历史低", low, true));
+    if (recent) lines.push(show("30天低", recent, true));
+    const festival = [["618", get("618价格")], ["双11", get("双11价格")]].filter(x => x[1]);
+    if (festival.length) lines.push(festival.map(([label, row]) => show(label, row, false) + (row.date ? "(" + row.date.slice(0, 4) + ")" : "")).join(" · "));
+    if (!lines.length) {
+      for (const [label, name] of [["60天低", "60天最低价"], ["180天低", "180天最低价"]]) {
+        const row = get(name);
+        if (row) lines.push(show(label, row, true));
+      }
+    }
+    return lines;
   }
   function load(key, fallback) {
     try { return JSON.parse($prefs.valueForKey(key) || "null") || fallback; } catch (_) { return fallback; }
@@ -174,12 +264,12 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     return result;
   }
   async function getExternalHistory(product) {
-    if (product.platform !== "jd" || !$prefs.valueForKey("jev:mmb_config")) return null;
+    if (!["jd", "taobao"].includes(product.platform) || !$prefs.valueForKey("jev:mmb_config")) return null;
     const id = product.sku_id || product.item_id;
-    const cacheKey = "jev:mmb_history:" + id;
+    const cacheKey = "jev:mmb_history:" + (product.platform === "taobao" ? "taobao:" : "") + id;
     const cached = load(cacheKey, null);
     if (cached && Array.isArray(cached.entries) && Date.now() - cached.at < 6 * 3600000) return cached;
-    const itemUrl = "https://item.jd.com/" + id + ".html";
+    const itemUrl = product.platform === "taobao" ? "https://item.taobao.com/item.htm?id=" + id : "https://item.jd.com/" + id + ".html";
     let basic;
     let queryVersion = "V1";
     try {
@@ -194,7 +284,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       queryVersion = "V2";
     }
     if (!basic.result || !basic.result.url || !basic.result.spbh) throw new Error("MMB product missing");
-    const mappedId = String(basic.result.url).match(/(?:item\.jd\.com\/|\/product\/)(\d+)\.html/);
+    const mappedId = product.platform === "taobao" ? String(basic.result.url).match(/^https?:\/\/(?:item\.taobao\.com|detail\.tmall\.com)\/[^#]*[?&]id=(\d+)(?:&|$)/) : String(basic.result.url).match(/(?:item\.jd\.com\/|\/product\/)(\d+)\.html/);
     if (!mappedId || mappedId[1] !== id) throw new Error("MMB product mismatch");
     const trend = await mmbRequest({ methodName: "getHistoryTrend2021", url: basic.result.url, spbh: basic.result.spbh,
       c_ctrl: "TrendDetailScene", callPos: "trend_detail", currentScene: "TrendDetailRecent", eventName: "查询商品历史价格", pagecFrom: "TrendHomeUnInput", chartStyleTest: "testA" }, "history/v2/getHistoryTrend");
@@ -221,23 +311,6 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       } })
     }, 5000);
   }
-  function compactHistory(external) {
-    const labels = { "当前到手价": "参考价", "历史最低价": "历史低", "30天最低价": "30天低", "60天最低价": "60天低", "180天最低价": "180天低", "618价格": "618", "双11价格": "双11" };
-    const order = ["当前到手价", "历史最低价", "30天最低价", "60天最低价", "180天最低价", "618价格", "双11价格"];
-    const rows = order.map(label => external.entries.find(r => r.label === label)).filter(Boolean);
-    const grouped = [];
-    for (const row of rows) {
-      const same = grouped.find(g => row.label !== "当前到手价" && !g.labels.includes("参考价") && g.price === row.price && g.date === row.date);
-      if (same) same.labels.push(labels[row.label]);
-      else grouped.push({ labels: [labels[row.label]], price: row.price, date: row.date });
-    }
-    return grouped.map(row => row.labels.join(" / ") + " ¥" + row.price.toFixed(2) + (row.date ? " · " + row.date.replace(/\//g, "-") : ""));
-  }
-  function resultExplanation(action, referenceOnly) {
-    if (referenceOnly) return "仅有参考价，未确认你的券后价及历史优惠条件，暂不能判断是否值得买。";
-    const reasons = { buy: "可比价格记录支持当前优惠；请核对规格和结算价。", wait: "可比记录出现过更低价，可等待或比较活动。", skip: "现有价格与条件不利，建议比较其他选择。", unsure: "到手价条件或可比历史不足，暂不能确定是否值得买。" };
-    return reasons[action];
-  }
   function captureJdPrices(body) {
     const raw = String(body || "").trim();
     const wrapped = raw.match(/^[A-Za-z_$][\w$]*\s*\(([\s\S]*)\)\s*;?$/);
@@ -255,10 +328,11 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const jdCached = load("jev:jd_price:" + id, null);
     const jd = jdCached && now - jdCached.at < 60000 && money(jdCached.price) ? jdCached : null;
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
-    if (stamp && stamp.version === 5 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
+    if (stamp && stamp.version === 6 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
     // Only use this response's package description; never execute page JavaScript.
     const pack = String(html || "").match(/包装清单<\/span>[\s\S]{0,500}?class=["']content-block["'][^>]*>([\s\S]*?)<\/div>/);
-    const title = pack ? text(pack[1], 200) : "京东商品 " + id;
+    const landing = jdHtml(html, id);
+    const title = landing && landing.title || (pack ? text(pack[1], 200) : "京东商品 " + id);
     let external = null;
     let historyFailure = "这款商品暂无可用历史记录";
     const configured = Boolean($prefs.valueForKey("jev:mmb_config"));
@@ -271,13 +345,14 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (finished) return;
     const lines = ["Jev：未运行 · 缺少当前价"];
     let analyzed = false;
+    let resultLines = null;
     const reference = external && external.entries.find(row => row.label === "当前到手价" && money(row.price));
     const key = $prefs.valueForKey("jev:api_key") || API_KEY;
     const current = jd || reference;
     const analysisKey = current ? "jev:reference:" + id + ":" + (jd ? "jd:" : "mmb:") + current.price : "";
     if (current && key && key !== "apikey_xxx") {
       const cached = load(analysisKey, null);
-      if (cached && cached.version === 5 && cached.configAt === configAt) return;
+      if (cached && cached.version === 6 && cached.configAt === configAt) return;
       lockKey = "jev:pending:reference:" + id;
       const pending = Number($prefs.valueForKey(lockKey));
       if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -297,21 +372,23 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
           typeof a.discount_score.score !== "number" || !Number.isFinite(a.discount_score.score) || a.discount_score.score < 0 || a.discount_score.score > 5 ||
           typeof a.inflated.noul !== "number" || !Number.isFinite(a.inflated.noul) || a.inflated.noul < 0 || a.inflated.noul > 1) throw new Error("schema");
         // Force uncertainty: third-party price conditions and account price are unknown.
-        lines[0] = "Jev：信息不足 · 证据 " + a.discount_score.score.toFixed(1) + "/5";
+        resultLines = readableAnswers(a, "unsure", true);
+        lines[0] = resultLines[0];
 
         analyzed = true;
       } catch (_) { lines[0] = "Jev：请求失败 · 历史价仍可查看"; }
     } else if (current) lines[0] = "Jev：未运行 · 尚未配置 API key";
 
-    lines.push("", "── 价格记录 ──");
-    if (jd) lines.push("京东展示价 ¥" + jd.price.toFixed(2) + " · 券补贴未确认");
-    if (external) {
-      lines.push(...compactHistory(external), "来源：慢慢买");
-    } else lines.push(configured ? "历史价格：" + historyFailure : "历史价格：尚未配置慢慢买");
-    lines.push("", "── 结果说明 ──", analyzed ? (jd ? "已取得京东展示价，但券、补贴及历史优惠条件未核实，暂不能确认到手价优势。" : resultExplanation("unsure", true)) : external || jd ? "本次未完成 Jev 分析；已有价格仅供参考。" : "未取得当前价和历史价，本次没有形成购买建议。");
-    $notify("📉 Jev 购物分析", title, lines.join("\n"));
-    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 5, configAt }), analysisKey);
-    $prefs.setValueForKey(JSON.stringify({ version: 5, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
+    if (jd) lines.push("京东展示 ¥" + jd.price.toFixed(2) + " · 券补贴未确认");
+    else if (reference) lines.push("参考价 ¥" + reference.price.toFixed(2) + " · 非账号价");
+    if (external) lines.push(...priceSummary(external));
+    else lines.push(configured ? "历史：" + historyFailure : "历史：尚未配置慢慢买");
+    if (resultLines) lines.push(...resultLines.slice(1));
+    else lines.push("解读：本次未完成模型分析，没有购买建议。");
+    if (external) lines.push("来源：慢慢买 · 优惠条件未核实");
+    $notify("📉 Jev 购物分析", text(title, 64), lines.join("\n"));
+    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 6, configAt }), analysisKey);
+    $prefs.setValueForKey(JSON.stringify({ version: 6, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
   }
   async function run() {
     const url = String($request.url || "");
@@ -321,7 +398,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       if (params.c_mmbDevId && $prefs.valueForKey("jev:mmb_config") !== $request.body) {
         $prefs.setValueForKey($request.body, "jev:mmb_config");
         $prefs.setValueForKey(String(Date.now()), "jev:mmb_config_at");
-        $notify("Jev 配置", "慢慢买配置已保存", "已保存到本机，后续京东分析将尝试查询历史价格。");
+        $notify("Jev 配置", "慢慢买配置已保存", "已保存到本机，后续商品分析将尝试查询历史价格。");
       }
       return;
     }
@@ -329,10 +406,10 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       captureJdPrices($response.body);
       return;
     }
-    const graph = url.match(/^https?:\/\/in\.m\.jd\.com\/product\/graphext\/(\d+)\.html/);
-    const platform = graph ? "jd" : /^https?:\/\/api\.m\.jd\.com\//.test(url) ? "jd" : /^https?:\/\/trade-acs\.m\.taobao\.com\//.test(url) ? "taobao" : null;
+    const graph = url.match(/^https?:\/\/(?:in\.m\.jd\.com\/product\/graphext|item\.m\.jd\.com\/product)\/(\d+)\.html/);
+    const platform = graph ? "jd" : /^https?:\/\/api\.m\.jd\.com\//.test(url) ? "jd" : /^https?:\/\/(?:trade-acs|h5api|acs)\.m\.taobao\.com\//.test(url) ? "taobao" : null;
     if (!platform) return;
-    const product = graph ? load("jev:jd_context:" + graph[1], null) : extract(JSON.parse($response.body), platform);
+    const product = graph ? load("jev:jd_context:" + graph[1], null) : (platform === "jd" ? jdDetail(parseBody($response.body)) : taobaoDetail(parseBody($response.body)));
     if (graph && (!product || !product.captured_at || Date.now() - product.captured_at > 60000 || !product.title || !product.price || !product.item_id || String(product.sku_id || product.item_id) !== graph[1])) {
       await graphFallback(graph[1], $response.body);
       return;
@@ -340,7 +417,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (!product) return;
     // Fail closed on incomplete or ambiguous product identification.
     if (!product.title || !product.price || !product.item_id) return;
-    if (platform === "taobao" && !product.sku_id) return;
+    if (platform === "taobao" && !product.sku_id && !product.item_level) return;
     if (platform === "jd") product.price_source = "京东商品详情接口";
     if (platform === "jd" && !graph) $prefs.setValueForKey(JSON.stringify({ ...product, captured_at: Date.now() }), "jev:jd_context:" + (product.sku_id || product.item_id));
     if (graph && (!product.captured_at || Date.now() - product.captured_at > 60000)) return;
@@ -362,8 +439,8 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     } : { source: "设备本地浏览记录", observations: 0 };
     const cacheKey = "jev:" + product.title + ":" + product.price;
     const cached = load(cacheKey, null);
-    const configAt = platform === "jd" ? ($prefs.valueForKey("jev:mmb_config_at") || "") : "";
-    if (cached && cached.identity === identity && cached.version === 2 && cached.configAt === configAt) return;
+    const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
+    if (cached && cached.identity === identity && cached.version === 6 && cached.configAt === configAt) return;
     lockKey = "jev:pending:" + identity;
     const pending = Number($prefs.valueForKey(lockKey));
     if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -385,22 +462,16 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (!["buy", "wait", "skip", "unsure"].includes(a.action.choice)) return;
     let action = a.action.choice;
     if (confidence < 0.55 || !previous.length || !product.price_condition) action = "unsure";
-    const labels = { buy: "可以考虑", wait: "建议等等", skip: "建议跳过", unsure: "信息不足" };
-    const lines = ["Jev：" + labels[action] + " · 优惠证据 " + score.toFixed(1) + "/5", (platform === "jd" ? "京东展示价：¥" : "当前展示价：¥") + product.price.toFixed(2), "价格条件：" + condition];
-    if (external) {
-      lines.push(...compactHistory(external), "来源：慢慢买 · 条件未核实");
-    }
-    if (previous.length) {
-      const lowest = localHistory.lowest;
-      lines.push("近90天本地最低记录：¥" + lowest.toFixed(2));
-      const diff = product.price - lowest;
-      lines.push("与最低记录相比：" + (diff > 0 ? "高" : diff < 0 ? "低" : "持平") + (diff === 0 ? "" : " ¥" + Math.abs(diff).toFixed(2)));
-      lines.push("来源：本地浏览记录 · " + previous.length + "条 · 非完整历史");
-    } else if (!external) lines.push("历史价格：数据不足", "来源：本地记录，首次浏览");
+    const explanations = readableAnswers(a, action, action === "unsure" && a.action.choice !== "unsure" || !product.price_condition || product.item_level);
+    const lines = [explanations[0], (platform === "jd" ? "京东展示" : "淘宝展示") + " ¥" + product.price.toFixed(2) + (product.item_level ? " · 未选规格" : " · 到手条件待核")];
+    if (external) lines.push(...priceSummary(external));
+    else if (previous.length) lines.push("本地低 ¥" + localHistory.lowest.toFixed(2) + " · " + previous.length + "次记录");
+    else lines.push("历史：暂无可比记录");
+    lines.push(...explanations.slice(1));
+    lines.push(external ? "来源：慢慢买 · 历史优惠条件未核实" : "来源：本地浏览 · 非完整历史");
     if (finished) return;
-    lines.push("", "── 结果说明 ──", resultExplanation(action, false));
-    $notify("📉 Jev 购物分析", product.title, lines.join("\n"));
-    $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 2, configAt }), cacheKey);
+    $notify("📉 Jev 购物分析", text(product.title, 64), lines.join("\n"));
+    $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 6, configAt }), cacheKey);
   }
   run().catch(function () { console.log("Jev：本次分析失败，原样放行"); }).then(finish);
 })();
