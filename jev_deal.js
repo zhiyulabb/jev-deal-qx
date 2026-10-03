@@ -200,6 +200,28 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (!finished) $prefs.setValueForKey(JSON.stringify(result), cacheKey);
     return result;
   }
+  async function graphFallback(id, html) {
+    const stampKey = "jev:graph_notice:" + id;
+    const now = Date.now();
+    const stamp = load(stampKey, null);
+    const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
+    if (stamp && stamp.configAt === configAt && now - stamp.at < stamp.ttl) return;
+    // Only use this response's package description; never execute page JavaScript.
+    const pack = String(html || "").match(/包装清单<\/span>[\s\S]{0,500}?class=["']content-block["'][^>]*>([\s\S]*?)<\/div>/);
+    const title = pack ? text(pack[1], 200) : "京东商品 " + id;
+    let external = null;
+    const configured = Boolean($prefs.valueForKey("jev:mmb_config"));
+    try { external = await getExternalHistory({ platform: "jd", item_id: id, sku_id: id }); }
+    catch (_) { console.log("Jev：图文详情历史价查询失败"); }
+    if (finished) return;
+    const lines = ["Jev：未运行 · 缺少当前价格", "当前账号展示价：未获取"];
+    if (external) {
+      for (const row of external.entries) lines.push("慢慢买" + row.label + "：¥" + row.price.toFixed(2) + (row.date ? " · " + row.date : " · 日期未提供"));
+      lines.push("来源：慢慢买 · 优惠条件未核实", "第三方当前价不代表你的账号到手价");
+    } else lines.push(configured ? "历史价格：查询失败或无可用记录" : "历史价格：尚未配置慢慢买");
+    $notify("Jev 商品价格信息", title, lines.join("\n"));
+    $prefs.setValueForKey(JSON.stringify({ at: now, ttl: external ? 600000 : 60000, configAt }), stampKey);
+  }
   async function run() {
     const url = String($request.url || "");
     // Setup request: store only locally, never put request data into a notification.
@@ -216,6 +238,10 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const platform = graph ? "jd" : /^https?:\/\/api\.m\.jd\.com\//.test(url) ? "jd" : /^https?:\/\/trade-acs\.m\.taobao\.com\//.test(url) ? "taobao" : null;
     if (!platform) return;
     const product = graph ? load("jev:jd_context:" + graph[1], null) : extract(JSON.parse($response.body), platform);
+    if (graph && (!product || !product.captured_at || Date.now() - product.captured_at > 60000 || !product.title || !product.price || !product.item_id || String(product.sku_id || product.item_id) !== graph[1])) {
+      await graphFallback(graph[1], $response.body);
+      return;
+    }
     if (!product) return;
     // Fail closed on incomplete or ambiguous product identification.
     if (!product.title || !product.price || !product.item_id) return;
