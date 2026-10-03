@@ -197,14 +197,14 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       "模型" + labels[a.action.choice] + "；" + grade + "，抬价待核实。"];
   }
   function priceRow(label, dateOrSource, price) {
-    // CJK columns use full-width padding; numeric columns use digit-width spaces.
-    const width = value => Array.from(value).reduce((n, ch) => n + (/[^\x00-\x7f]/.test(ch) ? 2 : 1), 0);
-    const pad = (value, size) => {
-      const missing = Math.max(0, size - width(value));
-      return value + "　".repeat(Math.floor(missing / 2)) + (missing % 2 ? " " : "");
+    // Native notifications cannot select a monospace font. Keep each column
+    // entirely in full-width glyphs, without mixing ASCII or digit-width spaces.
+    const full = value => String(value).replace(/[!-~]/g, ch => String.fromCharCode(ch.charCodeAt(0) + 0xfee0)).replace(/¥/g, "￥");
+    const pad = (value, size, right) => {
+      const gap = "　".repeat(Math.max(0, size - Array.from(value).length));
+      return right ? gap + value : value + gap;
     };
-    const amount = "¥" + price.toFixed(2);
-    return pad(label, 8) + "  " + pad(dateOrSource || "—", 10) + "  " + " ".repeat(Math.max(0, 8 - amount.length)) + amount;
+    return pad(full(label), 5, false) + pad(full(dateOrSource || "—"), 10, false) + pad(full("¥" + price.toFixed(2)), 7, true);
   }
   function priceSummary(external) {
     if (!external) return [];
@@ -374,7 +374,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const jdCached = load("jev:jd_price:" + id, null);
     const jd = jdCached && now - jdCached.at < 60000 && money(jdCached.price) ? jdCached : null;
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
-    if (stamp && stamp.version === 16 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
+    if (stamp && stamp.version === 17 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
     // Only use this response's package description; never execute page JavaScript.
     const pack = String(html || "").match(/包装清单<\/span>[\s\S]{0,500}?class=["']content-block["'][^>]*>([\s\S]*?)<\/div>/);
     const landing = jdHtml(html, id);
@@ -398,7 +398,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const analysisKey = current ? "jev:reference:" + id + ":" + (jd ? "jd:" : "mmb:") + current.price : "";
     if (current && key && key !== "apikey_xxx") {
       const cached = load(analysisKey, null);
-      if (cached && cached.version === 16 && cached.configAt === configAt) return;
+      if (cached && cached.version === 17 && cached.configAt === configAt) return;
       lockKey = "jev:pending:reference:" + id;
       const pending = Number($prefs.valueForKey(lockKey));
       if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -436,8 +436,8 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (external && external.stale) lines.push("慢慢买缓存历史；本次刷新失败。");
     if (external) lines.push(jd ? "到手价与历史优惠条件待核。" : "账号价未取得，暂不作购买建议。");
     $notify("🛍️ Jev 购物分析", text(title, 36), lines.join("\n"));
-    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 16, configAt }), analysisKey);
-    $prefs.setValueForKey(JSON.stringify({ version: 16, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
+    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 17, configAt }), analysisKey);
+    $prefs.setValueForKey(JSON.stringify({ version: 17, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
   }
   async function run() {
     const url = String($request.url || "");
@@ -490,7 +490,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const cacheKey = "jev:" + product.title + ":" + product.price;
     const cached = load(cacheKey, null);
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
-    if (cached && cached.identity === identity && cached.version === 16 && cached.configAt === configAt) return;
+    if (cached && cached.identity === identity && cached.version === 17 && cached.configAt === configAt) return;
     lockKey = "jev:pending:" + identity;
     const pending = Number($prefs.valueForKey(lockKey));
     if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -532,7 +532,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     lines.push(external ? (external.stale ? "慢慢买缓存历史；本次刷新失败，优惠条件待核。" : "历史来自慢慢买，优惠条件待核。") : "本地浏览记录，非完整历史。");
     if (finished) return;
     $notify("🛍️ Jev 购物分析", text(product.title, 36), lines.join("\n"));
-    if (action) $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 16, configAt }), cacheKey);
+    if (action) $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 17, configAt }), cacheKey);
   }
   run().catch(function () { console.log("Jev：本次分析失败，原样放行"); }).then(finish);
 })();
