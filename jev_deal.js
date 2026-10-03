@@ -196,6 +196,16 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     return ["Jev决策分析\n" + labels[finalAction] + "|证据" + score.toFixed(1) + "/5|把握" + Math.round(a.action.confidence * 100) + "%|抬价" + Math.round(a.inflated.noul * 100) + "%",
       "模型" + labels[a.action.choice] + "；" + grade + "，抬价待核实。"];
   }
+  function priceRow(label, dateOrSource, price) {
+    // CJK columns use full-width padding; numeric columns use digit-width spaces.
+    const width = value => Array.from(value).reduce((n, ch) => n + (/[^\x00-\x7f]/.test(ch) ? 2 : 1), 0);
+    const pad = (value, size) => {
+      const missing = Math.max(0, size - width(value));
+      return value + "　".repeat(Math.floor(missing / 2)) + (missing % 2 ? " " : "");
+    };
+    const amount = "¥" + price.toFixed(2);
+    return pad(label, 8) + "  " + pad(dateOrSource || "—", 10) + "  " + " ".repeat(Math.max(0, 8 - amount.length)) + amount;
+  }
   function priceSummary(external) {
     if (!external) return [];
     const labels = { "历史最低价": "历史低", "180天最低价": "180天低", "60天最低价": "60天低", "30天最低价": "30天低", "618价格": "618", "双11价格": "双11" };
@@ -205,7 +215,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     }
     return external.entries.filter(row => labels[row.label]).slice()
       .sort((a, b) => dateOrder(b.date) - dateOrder(a.date))
-      .map(row => labels[row.label] + " ¥" + row.price.toFixed(2) + (row.date ? " · " + row.date.replace(/\//g, "-") : ""));
+      .map(row => priceRow(labels[row.label], row.date ? row.date.replace(/\//g, "-").replace(/-(\d)(?=-|$)/g, "-0$1") : "—", row.price));
   }
 
   function load(key, fallback) {
@@ -364,7 +374,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const jdCached = load("jev:jd_price:" + id, null);
     const jd = jdCached && now - jdCached.at < 60000 && money(jdCached.price) ? jdCached : null;
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
-    if (stamp && stamp.version === 15 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
+    if (stamp && stamp.version === 16 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
     // Only use this response's package description; never execute page JavaScript.
     const pack = String(html || "").match(/包装清单<\/span>[\s\S]{0,500}?class=["']content-block["'][^>]*>([\s\S]*?)<\/div>/);
     const landing = jdHtml(html, id);
@@ -388,7 +398,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const analysisKey = current ? "jev:reference:" + id + ":" + (jd ? "jd:" : "mmb:") + current.price : "";
     if (current && key && key !== "apikey_xxx") {
       const cached = load(analysisKey, null);
-      if (cached && cached.version === 15 && cached.configAt === configAt) return;
+      if (cached && cached.version === 16 && cached.configAt === configAt) return;
       lockKey = "jev:pending:reference:" + id;
       const pending = Number($prefs.valueForKey(lockKey));
       if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -412,22 +422,22 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
         lines[0] = resultLines[0];
 
         analyzed = true;
-      } catch (_) { lines[0] = "Jev决策分析\n请求失败 · 历史价仍可查看"; }
+      } catch (_) { lines[0] = "Jev决策分析\n请求失败"; }
     } else if (current) lines[0] = "Jev决策分析\n未运行 · 尚未配置 API key";
 
     if (resultLines) lines.push(...resultLines.slice(1));
     else lines.push("本次未完成模型分析，没有购买建议。");
     lines.push("历史价格");
-    if (jd) lines.push("当前价格 · 京东展示 · ¥" + jd.price.toFixed(2) + " · 券补贴未确认");
-    else if (reference) lines.push("参考 ¥" + reference.price.toFixed(2) + " · 慢慢买");
+    if (jd) lines.push(priceRow("当前价格", "京东展示", jd.price));
+    else if (reference) lines.push(priceRow("参考价格", "慢慢买", reference.price));
     if (external) lines.push(...priceSummary(external));
     else lines.push(configured ? "历史：" + historyFailure : "历史：尚未配置慢慢买");
 
     if (external && external.stale) lines.push("慢慢买缓存历史；本次刷新失败。");
     if (external) lines.push(jd ? "到手价与历史优惠条件待核。" : "账号价未取得，暂不作购买建议。");
     $notify("🛍️ Jev 购物分析", text(title, 36), lines.join("\n"));
-    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 15, configAt }), analysisKey);
-    $prefs.setValueForKey(JSON.stringify({ version: 15, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
+    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 16, configAt }), analysisKey);
+    $prefs.setValueForKey(JSON.stringify({ version: 16, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
   }
   async function run() {
     const url = String($request.url || "");
@@ -480,7 +490,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const cacheKey = "jev:" + product.title + ":" + product.price;
     const cached = load(cacheKey, null);
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
-    if (cached && cached.identity === identity && cached.version === 15 && cached.configAt === configAt) return;
+    if (cached && cached.identity === identity && cached.version === 16 && cached.configAt === configAt) return;
     lockKey = "jev:pending:" + identity;
     const pending = Number($prefs.valueForKey(lockKey));
     if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -496,7 +506,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     }
     if (finished) return;
     const history = { local: localHistory, external, external_price_conditions_verified: false };
-    let explanations = ["Jev决策分析\n未运行", "尚未配置 API key；历史价格仍可查看。"];
+    let explanations = ["Jev决策分析\n未运行", "尚未配置 API key。"];
     let action = null;
     if (key && key !== "apikey_xxx") {
       try {
@@ -512,17 +522,17 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
         if (confidence < 0.55 || !previous.length || !product.price_condition) action = "unsure";
         explanations = readableAnswers(a, action, action === "unsure" && a.action.choice !== "unsure" || !product.price_condition || product.item_level);
       } catch (_) {
-        explanations = ["Jev决策分析\n暂未取得分析结果", "模型请求失败；历史价格仍可查看。"];
+        explanations = ["Jev决策分析\n暂未取得分析结果", "模型请求失败，暂不提供购买建议。"];
       }
     }
-    const lines = [...explanations, "历史价格", "当前价格 · " + (platform === "jd" ? "京东展示" : "淘宝展示") + " · ¥" + product.price.toFixed(2)];
+    const lines = [...explanations, "历史价格", priceRow("当前价格", platform === "jd" ? "京东展示" : "淘宝展示", product.price)];
     if (external) lines.push(...priceSummary(external));
     else if (previous.length) lines.push("本地低 ¥" + localHistory.lowest.toFixed(2) + " · " + previous.length + "次记录");
     else lines.push(historyFailure);
     lines.push(external ? (external.stale ? "慢慢买缓存历史；本次刷新失败，优惠条件待核。" : "历史来自慢慢买，优惠条件待核。") : "本地浏览记录，非完整历史。");
     if (finished) return;
     $notify("🛍️ Jev 购物分析", text(product.title, 36), lines.join("\n"));
-    if (action) $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 15, configAt }), cacheKey);
+    if (action) $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 16, configAt }), cacheKey);
   }
   run().catch(function () { console.log("Jev：本次分析失败，原样放行"); }).then(finish);
 })();
