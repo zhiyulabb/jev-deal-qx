@@ -193,7 +193,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const labels = { buy: "考虑购买", wait: "建议等待", skip: "建议跳过", unsure: "信息不足" };
     const score = a.discount_score.score;
     const grade = score < 1 ? "优惠依据很弱" : score < 2 ? "优惠依据较弱" : score < 3 ? "优惠依据有限" : score < 4 ? "优惠依据尚可" : "优惠依据较充分";
-    return [labels[finalAction] + "|证据" + score.toFixed(1) + "/5|把握" + Math.round(a.action.confidence * 100) + "%|抬价" + Math.round(a.inflated.noul * 100) + "%",
+    return ["Jev：" + labels[finalAction] + "|证据" + score.toFixed(1) + "/5|把握" + Math.round(a.action.confidence * 100) + "%|抬价" + Math.round(a.inflated.noul * 100) + "%",
       "说明：模型" + labels[a.action.choice] + "；" + grade + "，抬价待核实。"];
   }
   function priceSummary(external) {
