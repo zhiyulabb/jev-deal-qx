@@ -582,6 +582,13 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const graph = url.match(/^https?:\/\/(?:in\.m\.jd\.com\/product\/graphext|item\.m\.jd\.com\/product)\/(\d+)\.html/);
     const platform = graph ? "jd" : /^https?:\/\/api\.m\.jd\.com\//.test(url) ? "jd" : /^https?:\/\/(?:trade-acs|h5api|acs)\.m\.taobao\.com\//.test(url) ? "taobao" : null;
     if (!platform) return;
+    // Loon reference plugin starts graph history on request, before HTML returns.
+    if (graph && typeof $response === "undefined") {
+      const context = load("jev:jd_context:" + graph[1], null);
+      await graphFallback(graph[1], "", context && String(context.item_id) === graph[1] ? context : null);
+      return;
+    }
+    if (typeof $response === "undefined") return;
     const landing = graph ? jdHtml($response.body, graph[1]) : null;
     const product = graph ? (landing && landing.price ? { ...landing, captured_at: Date.now() } : load("jev:jd_context:" + graph[1], null)) : (platform === "jd" ? (/(?:^|[?&])functionId=pc_detailpage_wareBusiness(?:&|$)/.test(url + "&" + ($request.body || "")) ? jdPcDetail(parseBody($response.body), url, $request.body) : (/(?:^|[?&])functionId=wareBusiness(?:&|$)/.test(url + "&" + ($request.body || "")) ? jdEntryDetail(parseBody($response.body), url, $request.body) : jdDetail(parseBody($response.body)))) : taobaoDetail(parseBody($response.body)));
     if (graph && (!product || !product.captured_at || Date.now() - product.captured_at > 60000 || !product.title || !product.price || !product.item_id || String(product.sku_id || product.item_id) !== graph[1])) {

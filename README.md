@@ -31,3 +31,7 @@ Jev 未配置、请求失败或返回格式无效时，通知仍显示当前展�
 ### Loon 插件
 
 导入 `jev_deal.plugin`（Loon 3.2.1 build 734 或更新版本），在插件参数中填入本机 Jev API key，启用插件及其 MitM，安装并信任 Loon 自己的证书。打开慢慢买「我的」采集历史配置。Loon 与圈 X 的本地存储不互通，需要重新配置。脚本通过运行时适配器使用 Loon 的 persistentStore、notification 和 httpClient，全部请求响应原样放行。解析逻辑与圈 X 共用；导入 Loon 不保证修复原生 App 商品入口未捕获的问题。已通过 Loon 模拟回放及 QX 回归，手机实测待确认。API key 仅在设备填写，勿分享含真实参数的配置。
+
+### Loon 图文请求阶段触发
+
+参照 mw418 的公开 [京东比价脚本](https://github.com/mw418/Loon/blob/main/script/jd_price.js)，Loon 插件增加 `in.m.jd.com/product/graphext/数字.html` 的 http-request 阶段历史查询，保留响应阶段读取 HTML 的能力。请求阶段没有 response 时按 URL 商品编号查询，同商品通知沿用现有去重。请求仍需等待脚本查询完成才放行，保护时限15秒；这不是商品首页事件，也不保证首页会发出该请求。可莉当前 JD_Price.lpx 下载仍返回403，此项参考的是署名作者公开源码，不声明与可莉现版完全一致。通过无 response 的 Loon 请求阶段回放及既有解析回归；手机待实测。
