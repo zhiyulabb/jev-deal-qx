@@ -2,6 +2,25 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
 
 // Quantumult X script-response-body. Every exit preserves the original response.
 (function () {
+  // One-shot QX task setup. URL fragments stay on the device, not in HTTP requests.
+  if (typeof $request === "undefined") {
+    try {
+      const env = typeof $environment === "object" ? $environment : {};
+      let setupKey = env.variables && env.variables["setup-key"];
+      if (!setupKey) {
+        const match = String(env.sourcePath || "").match(/[#&]setup-key=([^&]*)/);
+        if (match) setupKey = decodeURIComponent(match[1]);
+      }
+      if (typeof setupKey !== "string" || !setupKey.trim() || setupKey === "YOUR_API_KEY" || /[\s,#&]/.test(setupKey)) {
+        $notify("Jev 配置", "未保存", "请在任务地址的 #setup-key= 后填写自己的 API key。");
+      } else {
+        const ok = $prefs.setValueForKey(setupKey, "jev:api_key");
+        $notify("Jev 配置", ok ? "API key 已保存" : "保存失败", "执行后删除这条配置任务。");
+      }
+    } catch (_) { $notify("Jev 配置", "保存失败", "请检查任务配置，勿公开 API key。"); }
+    $done({});
+    return;
+  }
   let finished = false;
   let lockKey = "";
   let lockToken = "";
