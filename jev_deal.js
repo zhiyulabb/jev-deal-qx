@@ -2,6 +2,31 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
 
 // Quantumult X script-response-body. Every exit preserves the original response.
 (function () {
+  // Runtime adapters keep QX and Loon on one parser implementation.
+  const prefs = typeof $prefs !== "undefined" ? $prefs : {
+    valueForKey: key => $persistentStore.read(key),
+    setValueForKey: (value, key) => $persistentStore.write(String(value), key),
+    removeValueForKey: key => $persistentStore.write("", key)
+  };
+  const notify = typeof $notify === "function" ? $notify :
+    (title, subtitle, body) => $notification.post(title, subtitle, body);
+  const fetchRequest = typeof $task !== "undefined" ? options => $task.fetch(options) :
+    options => new Promise((resolve, reject) => {
+      const method = String(options.method || "GET").toLowerCase();
+      if (typeof $httpClient[method] !== "function") { reject(new Error("Unsupported method")); return; }
+      $httpClient[method]({ ...options, timeout: 5000 }, (error, response, body) => {
+        if (error) { reject(new Error("Network request failed")); return; }
+        resolve({ statusCode: response.status, headers: response.headers, body });
+      });
+    });
+  if (typeof $loon !== "undefined" && typeof $argument !== "undefined") {
+    try {
+      const args = typeof $argument === "string" ? JSON.parse($argument) : $argument;
+      const key = Array.isArray(args) ? args[0] : args && args.apiKey;
+      if (typeof key === "string" && key.trim() && key !== "YOUR_API_KEY" && !/[\s,#&]/.test(key))
+        prefs.setValueForKey(key, "jev:api_key");
+    } catch (_) {}
+  }
   // One-shot QX task setup. URL fragments stay on the device, not in HTTP requests.
   if (typeof $request === "undefined") {
     try {
@@ -12,12 +37,12 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
         if (match) setupKey = decodeURIComponent(match[1]);
       }
       if (typeof setupKey !== "string" || !setupKey.trim() || setupKey === "YOUR_API_KEY" || /[\s,#&]/.test(setupKey)) {
-        $notify("Jev 配置", "未保存", "请在任务地址的 #setup-key= 后填写自己的 API key。");
+        notify("Jev 配置", "未保存", "请在任务地址的 #setup-key= 后填写自己的 API key。");
       } else {
-        const ok = $prefs.setValueForKey(setupKey, "jev:api_key");
-        $notify("Jev 配置", ok ? "API key 已保存" : "保存失败", "执行后删除这条配置任务。");
+        const ok = prefs.setValueForKey(setupKey, "jev:api_key");
+        notify("Jev 配置", ok ? "API key 已保存" : "保存失败", "执行后删除这条配置任务。");
       }
-    } catch (_) { $notify("Jev 配置", "保存失败", "请检查任务配置，勿公开 API key。"); }
+    } catch (_) { notify("Jev 配置", "保存失败", "请检查任务配置，勿公开 API key。"); }
     $done({});
     return;
   }
@@ -32,7 +57,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     finished = true;
     clearTimeout(timer);
     try {
-      if (lockKey && $prefs.valueForKey(lockKey) === lockToken) $prefs.removeValueForKey(lockKey);
+      if (lockKey && prefs.valueForKey(lockKey) === lockToken) prefs.removeValueForKey(lockKey);
     } catch (_) {}
     $done({});
   }
@@ -231,17 +256,17 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
   }
   async function taobaoHistoryOnly(product) {
     const stampKey = "jev:taobao_history_notice:" + product.item_id;
-    const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
+    const configAt = prefs.valueForKey("jev:mmb_config_at") || "";
     const stamp = load(stampKey, null);
     const now = Date.now();
     if (stamp && stamp.version === 26 && stamp.configAt === configAt && now - stamp.at < 60000) return;
     lockKey = "jev:pending:taobao_history:" + product.item_id;
-    const pending = Number($prefs.valueForKey(lockKey));
+    const pending = Number(prefs.valueForKey(lockKey));
     if (pending && now - pending < 20000) { lockKey = ""; return; }
     lockToken = String(now);
-    $prefs.setValueForKey(lockToken, lockKey);
+    prefs.setValueForKey(lockToken, lockKey);
     let external = null;
-    let reason = $prefs.valueForKey("jev:mmb_config") ? "这款商品暂无可用历史记录。" : "尚未配置慢慢买。";
+    let reason = prefs.valueForKey("jev:mmb_config") ? "这款商品暂无可用历史记录。" : "尚未配置慢慢买。";
     try { external = await getExternalHistory(product); }
     catch (error) {
       reason = /mismatch/.test(String(error && error.message || "")) ? "返回商品编号不一致，未引用其他商品价格。" : "历史查询失败，请稍后重试。";
@@ -253,8 +278,8 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       if (reference) lines.push(priceRow("参考价格", "慢慢买", reference.price));
       lines.push(...priceSummary(external), external.stale ? "慢慢买缓存历史；本次刷新失败，优惠条件待核。" : "历史来自慢慢买，优惠条件待核。");
     } else lines.push(reason);
-    $notify("🛍️ Jev 购物分析", text(product.title, 36), lines.join("\n"));
-    $prefs.setValueForKey(JSON.stringify({ version: 26, configAt, at: now }), stampKey);
+    notify("🛍️ Jev 购物分析", text(product.title, 36), lines.join("\n"));
+    prefs.setValueForKey(JSON.stringify({ version: 26, configAt, at: now }), stampKey);
   }
   function jdHtml(html, id) {
     // Known JSON assignments only; never execute page JavaScript or decode price fonts.
@@ -318,7 +343,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
   }
 
   function load(key, fallback) {
-    try { return JSON.parse($prefs.valueForKey(key) || "null") || fallback; } catch (_) { return fallback; }
+    try { return JSON.parse(prefs.valueForKey(key) || "null") || fallback; } catch (_) { return fallback; }
   }
   // Request contract researched from wf021325/qx/js/jd_price.js (2026-10-03).
   // Reimplemented for QX notifications; no HTML injection or credential logging.
@@ -364,7 +389,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     let expiry;
     try {
       return await Promise.race([
-        $task.fetch(options),
+        fetchRequest(options),
         new Promise((_, reject) => { expiry = setTimeout(() => reject(new Error("Timeout")), ms); })
       ]);
     } finally { clearTimeout(expiry); }
@@ -372,7 +397,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
   async function mmbRequest(params, path, common) {
     historyStage = path.includes("priceRemark") ? "价格摘要" : path.includes("getHistoryTrend") ? "价格走势" : "商品匹配";
     if (finished || Date.now() >= historyDeadline) throw new Error("History deadline exceeded");
-    const saved = formParse($prefs.valueForKey("jev:mmb_config"));
+    const saved = formParse(prefs.valueForKey("jev:mmb_config"));
     if (!saved.c_mmbDevId) throw new Error("Missing MMB configuration");
     ["c_ctrl", "methodName", "level", "t", "token"].forEach(k => delete saved[k]);
     const payload = { ...saved, ...params, t: String(Date.now()) };
@@ -409,7 +434,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     }
   }
   async function fetchExternalHistory(product) {
-    if (!["jd", "taobao"].includes(product.platform) || !$prefs.valueForKey("jev:mmb_config")) return null;
+    if (!["jd", "taobao"].includes(product.platform) || !prefs.valueForKey("jev:mmb_config")) return null;
     const id = product.sku_id || product.item_id;
     const cacheKey = "jev:mmb_history:" + (product.platform === "taobao" ? "taobao:" : "") + id;
     const cached = load(cacheKey, null);
@@ -441,7 +466,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       .map(row => ({ label: row.Name, price: money(row.Price), date: /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(String(row.Date)) ? String(row.Date) : null }));
     if (!entries.some(row => row.label !== "当前到手价")) throw new Error("MMB history missing");
     const result = { source: "慢慢买", query_version: queryVersion, item_id: id, at: Date.now(), price_conditions_verified: false, entries };
-    if (!finished) $prefs.setValueForKey(JSON.stringify(result), cacheKey);
+    if (!finished) prefs.setValueForKey(JSON.stringify(result), cacheKey);
     return result;
   }
   async function queryJev(product, history, key) {
@@ -463,7 +488,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (!Array.isArray(rows) || rows.length > 200) return;
     for (const row of rows) {
       if (!row || !/^\d+$/.test(String(row.id)) || !money(row.p)) continue;
-      $prefs.setValueForKey(JSON.stringify({ price: money(row.p), at: Date.now(), source: "京东批量价格接口", account_price_observed: false }), "jev:jd_price:" + row.id);
+      prefs.setValueForKey(JSON.stringify({ price: money(row.p), at: Date.now(), source: "京东批量价格接口", account_price_observed: false }), "jev:jd_price:" + row.id);
     }
   }
   async function graphFallback(id, html, context) {
@@ -472,7 +497,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const stamp = load(stampKey, null);
     const jdCached = load("jev:jd_price:" + id, null);
     const jd = jdCached && now - jdCached.at < 60000 && money(jdCached.price) ? jdCached : null;
-    const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
+    const configAt = prefs.valueForKey("jev:mmb_config_at") || "";
     if (stamp && stamp.version === 26 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
     // Only use this response's package description; never execute page JavaScript.
     const pack = String(html || "").match(/包装清单<\/span>[\s\S]{0,500}?class=["']content-block["'][^>]*>([\s\S]*?)<\/div>/);
@@ -480,7 +505,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const title = context && context.title || landing && landing.title || (pack ? text(pack[1], 200) : "京东商品 " + id);
     let external = null;
     let historyFailure = "这款商品暂无可用历史记录";
-    const configured = Boolean($prefs.valueForKey("jev:mmb_config"));
+    const configured = Boolean(prefs.valueForKey("jev:mmb_config"));
     try { external = await getExternalHistory({ platform: "jd", item_id: id, sku_id: id }); }
     catch (error) {
       const message = String(error && error.message || "");
@@ -492,17 +517,17 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     let analyzed = false;
     let resultLines = null;
     const reference = external && !external.stale && external.entries.find(row => row.label === "当前到手价" && money(row.price));
-    const key = $prefs.valueForKey("jev:api_key") || API_KEY;
+    const key = prefs.valueForKey("jev:api_key") || API_KEY;
     const current = jd || reference;
     const analysisKey = current ? "jev:reference:" + id + ":" + (jd ? "jd:" : "mmb:") + current.price : "";
     if (current && key && key !== "apikey_xxx") {
       const cached = load(analysisKey, null);
       if (cached && cached.version === 26 && cached.configAt === configAt) return;
       lockKey = "jev:pending:reference:" + id;
-      const pending = Number($prefs.valueForKey(lockKey));
+      const pending = Number(prefs.valueForKey(lockKey));
       if (pending && now - pending < 20000) { lockKey = ""; return; }
       lockToken = String(now);
-      $prefs.setValueForKey(lockToken, lockKey);
+      prefs.setValueForKey(lockToken, lockKey);
       try {
         const response = await queryJev({ platform: "jd", item_id: id, sku_id: id, title,
           price: current.price, price_source: jd ? jd.source : "慢慢买第三方参考价", account_price_observed: false,
@@ -534,19 +559,19 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
 
     if (external && external.stale) lines.push("慢慢买缓存历史；本次刷新失败。");
     if (external) lines.push(jd ? "到手价与历史优惠条件待核。" : "账号价未取得，暂不作购买建议。");
-    $notify("🛍️ Jev 购物分析", text(title, 36), lines.join("\n"));
-    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 26, configAt }), analysisKey);
-    $prefs.setValueForKey(JSON.stringify({ version: 26, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
+    notify("🛍️ Jev 购物分析", text(title, 36), lines.join("\n"));
+    if (analyzed) prefs.setValueForKey(JSON.stringify({ version: 26, configAt }), analysisKey);
+    prefs.setValueForKey(JSON.stringify({ version: 26, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
   }
   async function run() {
     const url = String($request.url || "");
     // Setup request: store only locally, never put request data into a notification.
     if (/^https:\/\/apapia-sqk-weblogic\.manmanbuy\.com\/baoliao\/center\/menu$/.test(url)) {
       const params = formParse($request.body);
-      if (params.c_mmbDevId && $prefs.valueForKey("jev:mmb_config") !== $request.body) {
-        $prefs.setValueForKey($request.body, "jev:mmb_config");
-        $prefs.setValueForKey(String(Date.now()), "jev:mmb_config_at");
-        $notify("Jev 配置", "慢慢买配置已保存", "已保存到本机，后续商品分析将尝试查询历史价格。");
+      if (params.c_mmbDevId && prefs.valueForKey("jev:mmb_config") !== $request.body) {
+        prefs.setValueForKey($request.body, "jev:mmb_config");
+        prefs.setValueForKey(String(Date.now()), "jev:mmb_config_at");
+        notify("Jev 配置", "慢慢买配置已保存", "已保存到本机，后续商品分析将尝试查询历史价格。");
       }
       return;
     }
@@ -570,7 +595,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (!product.title || !product.price || !product.item_id) return;
     if (platform === "taobao" && !product.sku_id && !product.item_level) return;
     if (platform === "jd" && !product.price_source) product.price_source = "京东商品详情接口";
-    if (platform === "jd" && !graph) $prefs.setValueForKey(JSON.stringify({ ...product, captured_at: Date.now() }), "jev:jd_context:" + (product.sku_id || product.item_id));
+    if (platform === "jd" && !graph) prefs.setValueForKey(JSON.stringify({ ...product, captured_at: Date.now() }), "jev:jd_context:" + (product.sku_id || product.item_id));
     if (graph && (!product.captured_at || Date.now() - product.captured_at > 60000)) return;
     const condition = product.price_condition || "展示价，优惠条件未确认";
     const identity = [platform, product.item_id, product.sku_id || product.item_id, condition].join(":");
@@ -580,7 +605,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const previous = records.slice();
     const last = records[records.length - 1];
     if (!last || last.price !== product.price || now - last.at >= 86400000) records.push({ at: now, price: product.price });
-    $prefs.setValueForKey(JSON.stringify(records.slice(-120)), historyKey);
+    prefs.setValueForKey(JSON.stringify(records.slice(-120)), historyKey);
     const localHistory = previous.length ? {
       source: "设备本地浏览记录", observations: previous.length,
       first_at: previous[0].at, last_at: previous[previous.length - 1].at,
@@ -590,14 +615,14 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     } : { source: "设备本地浏览记录", observations: 0 };
     const cacheKey = "jev:" + product.title + ":" + product.price;
     const cached = load(cacheKey, null);
-    const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
+    const configAt = prefs.valueForKey("jev:mmb_config_at") || "";
     if (cached && cached.identity === identity && cached.version === 26 && cached.configAt === configAt) return;
     lockKey = "jev:pending:" + identity;
-    const pending = Number($prefs.valueForKey(lockKey));
+    const pending = Number(prefs.valueForKey(lockKey));
     if (pending && now - pending < 20000) { lockKey = ""; return; }
-    const key = $prefs.valueForKey("jev:api_key") || API_KEY;
+    const key = prefs.valueForKey("jev:api_key") || API_KEY;
     lockToken = String(now);
-    $prefs.setValueForKey(lockToken, lockKey);
+    prefs.setValueForKey(lockToken, lockKey);
     let external = null;
     let historyFailure = "暂无可用历史记录，请稍后重试。";
     try { external = await getExternalHistory(product); }
@@ -632,8 +657,8 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     else lines.push(historyFailure);
     lines.push(external ? (external.stale ? "慢慢买缓存历史；本次刷新失败，优惠条件待核。" : "历史来自慢慢买，优惠条件待核。") : "本地浏览记录，非完整历史。");
     if (finished) return;
-    $notify("🛍️ Jev 购物分析", text(product.title, 36), lines.join("\n"));
-    if (action) $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 26, configAt }), cacheKey);
+    notify("🛍️ Jev 购物分析", text(product.title, 36), lines.join("\n"));
+    if (action) prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 26, configAt }), cacheKey);
   }
   run().catch(function () { console.log("Jev：本次分析失败，原样放行"); }).then(finish);
 })();
