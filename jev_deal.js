@@ -5,6 +5,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
   let finished = false;
   let lockKey = "";
   let lockToken = "";
+  const historyDeadline = Date.now() + 9500;
   const timer = setTimeout(finish, 15000); // 历史价链路 + Jev 的总保护时间。
   function finish() {
     if (finished) return;
@@ -123,7 +124,8 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       ]);
     } finally { clearTimeout(expiry); }
   }
-  async function mmbRequest(params, path) {
+  async function mmbRequest(params, path, common) {
+    if (finished || Date.now() >= historyDeadline) throw new Error("History deadline exceeded");
     const saved = formParse($prefs.valueForKey("jev:mmb_config"));
     if (!saved.c_mmbDevId) throw new Error("Missing MMB configuration");
     ["c_ctrl", "methodName", "level", "t", "token"].forEach(k => delete saved[k]);
@@ -133,11 +135,11 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       .map(k => k.toUpperCase() + String(payload[k]).toUpperCase()).join("");
     payload.token = md5(encodeURIComponent(secret + ordered + secret)).toUpperCase();
     const response = await limitedFetch({
-      url: "https://apapia-history-weblogic.manmanbuy.com/" + path,
+      url: (common ? "https://apapia-common.manmanbuy.com/" : "https://apapia-history-weblogic.manmanbuy.com/") + path,
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 - mmbWebBrowse - ios" },
       body: Object.keys(payload).map(k => encodeURIComponent(k) + "=" + encodeURIComponent(String(payload[k]))).join("&")
-    }, 2500);
+    }, Math.min(2500, Math.max(1, historyDeadline - Date.now())));
     if (finished || response.statusCode < 200 || response.statusCode >= 300) throw new Error("MMB request failed");
     const result = JSON.parse(response.body);
     if (result.ok !== 1) throw new Error("MMB unavailable");
@@ -149,7 +151,20 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const cacheKey = "jev:mmb_history:" + id;
     const cached = load(cacheKey, null);
     if (cached && Array.isArray(cached.entries) && Date.now() - cached.at < 6 * 3600000) return cached;
-    const basic = await mmbRequest({ methodName: "getHistoryInfoJava", searchKey: "https://item.jd.com/" + id + ".html", c_ctrl: "Tabs" }, "basic/getItemBasicInfo");
+    const itemUrl = "https://item.jd.com/" + id + ".html";
+    let basic;
+    let queryVersion = "V1";
+    try {
+      basic = await mmbRequest({ methodName: "getHistoryInfoJava", searchKey: itemUrl, c_ctrl: "Tabs" }, "basic/getItemBasicInfo");
+      if (!basic.result || !basic.result.url || !basic.result.spbh) throw new Error("V1 product missing");
+    } catch (_) {
+      if (finished || Date.now() >= historyDeadline) throw new Error("History deadline exceeded");
+      const parsed = await mmbRequest({ methodName: "commonMethod", searchKey: itemUrl, scene: "TrendHomeUnInput", c_ctrl: "Tabs" }, "SiteCommand/parse", true);
+      if (!parsed.result || typeof parsed.result.link !== "string" || !parsed.result.link || !parsed.result.stteId) throw new Error("V2 parse failed");
+      // The parsed link is a query argument only; never a network destination.
+      basic = await mmbRequest({ methodName: "getHistoryInfoJava", searchKey: parsed.result.link, stteId: parsed.result.stteId, c_ctrl: "Tabs" }, "basic/v2/getItemBasicInfo");
+      queryVersion = "V2";
+    }
     if (!basic.result || !basic.result.url || !basic.result.spbh) throw new Error("MMB product missing");
     const mappedId = String(basic.result.url).match(/(?:item\.jd\.com\/|\/product\/)(\d+)\.html/);
     if (!mappedId || mappedId[1] !== id) throw new Error("MMB product mismatch");
@@ -162,7 +177,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       .filter(row => row && allowed.includes(row.Name) && money(row.Price))
       .map(row => ({ label: row.Name, price: money(row.Price), date: /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(String(row.Date)) ? String(row.Date) : null }));
     if (!entries.some(row => row.label !== "当前到手价")) throw new Error("MMB history missing");
-    const result = { source: "慢慢买", item_id: id, at: Date.now(), price_conditions_verified: false, entries };
+    const result = { source: "慢慢买", query_version: queryVersion, item_id: id, at: Date.now(), price_conditions_verified: false, entries };
     if (!finished) $prefs.setValueForKey(JSON.stringify(result), cacheKey);
     return result;
   }
