@@ -111,6 +111,70 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const match = raw.match(/^[A-Za-z_$][\w$]*\s*\(([\s\S]*)\)\s*;?$/);
     return JSON.parse(match ? match[1] : raw);
   }
+  function jdRequestInfo(url, body) {
+    const fields = Object.create(null);
+    const raw = (String(url).split("?")[1] || "") + "&" + (typeof body === "string" ? body : "");
+    if (raw.length > 256000) return null;
+    for (const part of raw.split("&")) {
+      const at = part.indexOf("=");
+      if (at < 0) continue;
+      const key = part.slice(0, at);
+      if (!["functionId", "body"].includes(key)) continue;
+      try {
+        const value = decodeURIComponent(part.slice(at + 1).replace(/\+/g, " "));
+        if (fields[key] && fields[key] !== value) return null;
+        fields[key] = value;
+      } catch (_) { return null; }
+    }
+    if (!["wareBusiness", "pc_detailpage_wareBusiness"].includes(fields.functionId)) return null;
+    let payload;
+    try { payload = JSON.parse(fields.body || "{}"); } catch (_) { return null; }
+    const ids = [payload.skuId, payload.wareId].filter(v => v != null).map(String);
+    if (!ids.length || ids.some(id => !/^\d+$/.test(id)) || new Set(ids).size !== 1) return null;
+    return { functionId: fields.functionId, id: ids[0] };
+  }
+  function jdSessionKey() {
+    if (typeof $response !== "undefined" && $response.sessionIndex != null && $request.sessionIndex != null && String($response.sessionIndex) !== String($request.sessionIndex)) return null;
+    const index = typeof $response !== "undefined" && $response.sessionIndex != null ? $response.sessionIndex : $request.sessionIndex;
+    return /^[A-Za-z0-9_-]{1,80}$/.test(String(index)) ? "jev:jd_session:" + index : null;
+  }
+  function captureJdRequest(url) {
+    const info = jdRequestInfo(url, $request.body);
+    const key = jdSessionKey();
+    if (!info) {
+      if (/(?:^|[?&])functionId=(?:wareBusiness|pc_detailpage_wareBusiness)(?:&|$)/.test(url + "&" + ($request.body || "")))
+        console.log("[Jev] v30 商品请求已命中，但商品编号缺失或冲突");
+      return;
+    }
+    if (key) {
+      const savedQueue = load("jev:jd_sessions", []);
+      const queue = (Array.isArray(savedQueue) ? savedQueue : []).filter(k => k !== key);
+      while (queue.length >= 50) prefs.removeValueForKey(queue.shift());
+      prefs.setValueForKey(JSON.stringify(queue.concat(key)), "jev:jd_sessions");
+      // Store only product identity; no cookies, signature or original request body.
+      prefs.setValueForKey(JSON.stringify({ ...info, urlHash: md5(url), at: Date.now() }), key);
+    }
+    console.log("[Jev] v30 京东商品请求 " + info.functionId + " · " + info.id + (key ? " · 已关联会话" : " · 缺少会话编号"));
+  }
+  function correlatedJdRequest(url) {
+    const direct = jdRequestInfo(url, $request.body);
+    const key = jdSessionKey();
+    const saved = key && load(key, null);
+    if (key) prefs.removeValueForKey(key);
+    const matched = saved && saved.urlHash === md5(url) && Date.now() - saved.at >= 0 && Date.now() - saved.at < 90000 ? saved : null;
+    if (direct && matched && (direct.id !== matched.id || direct.functionId !== matched.functionId)) return { conflict: true };
+    return direct || matched;
+  }
+  function showJdNotice(id, title, body) {
+    const key = "jev:jd_notice:" + id;
+    const previous = load(key, null);
+    if (previous && previous.body === body && Date.now() - previous.at < 8000) {
+      console.log("[Jev] v30 同商品短时重复通知已合并");
+      return;
+    }
+    notify("🛍️ Jev 购物分析", text(title, 22), body);
+    prefs.setValueForKey(JSON.stringify({ title, body, at: Date.now() }), key);
+  }
   function jdEntryDetail(root, requestUrl, requestBody) {
     const fields = Object.create(null);
     for (const part of ((requestUrl.split("?")[1] || "") + "&" + (typeof requestBody === "string" ? requestBody : "")).split("&")) {
@@ -241,7 +305,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const configAt = prefs.valueForKey("jev:mmb_config_at") || "";
     const stamp = load(stampKey, null);
     const now = Date.now();
-    if (stamp && stamp.version === 29 && stamp.configAt === configAt && now - stamp.at < 60000) return;
+    if (stamp && stamp.version === 30 && stamp.configAt === configAt && now - stamp.at < 60000) return;
     lockKey = "jev:pending:taobao_history:" + product.item_id;
     const pending = Number(prefs.valueForKey(lockKey));
     if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -261,7 +325,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       lines.push(...priceSummary(external), external.stale ? "慢慢买缓存 · 条件待核" : "慢慢买历史 · 条件待核");
     } else lines.push(reason);
     notify("🛍️ Jev 购物分析", text(product.title, 22), lines.join("\n"));
-    prefs.setValueForKey(JSON.stringify({ version: 29, configAt, at: now }), stampKey);
+    prefs.setValueForKey(JSON.stringify({ version: 30, configAt, at: now }), stampKey);
   }
   function jdHtml(html, id) {
     // Known JSON assignments only; never execute page JavaScript or decode price fonts.
@@ -487,18 +551,42 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       prefs.setValueForKey(JSON.stringify({ price: money(row.p), at: Date.now(), source: "京东批量价格接口", account_price_observed: false }), "jev:jd_price:" + row.id);
     }
   }
+  async function jdWebPrice(id) {
+    const attemptKey = "jev:jd_web_attempt:" + id;
+    const attempt = Number(prefs.valueForKey(attemptKey));
+    if (attempt && Date.now() - attempt < 60000) return null;
+    prefs.setValueForKey(String(Date.now()), attemptKey);
+    try {
+      const response = await limitedFetch({ url: "https://item.m.jd.com/product/" + id + ".html", method: "GET",
+        headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1" } }, 2500);
+      if (response.statusCode < 200 || response.statusCode >= 300) return null;
+      const page = jdHtml(response.body, id);
+      if (!page || !page.price) { console.log("[Jev] v30 网页价格缺失、遮蔽或要求登录 · " + id); return null; }
+      const current = { ...page, source: "京东网页", at: Date.now(), account_price_observed: false };
+      prefs.setValueForKey(JSON.stringify(current), "jev:jd_price:" + id);
+      prefs.setValueForKey(JSON.stringify({ ...page, captured_at: Date.now() }), "jev:jd_context:" + id);
+      console.log("[Jev] v30 同商品网页展示价已取得 · " + id);
+      return current;
+    } catch (_) { return null; }
+  }
   async function graphFallback(id, html, context) {
     const stampKey = "jev:graph_notice:" + id;
     const now = Date.now();
     const stamp = load(stampKey, null);
     const jdCached = load("jev:jd_price:" + id, null);
-    const jd = jdCached && now - jdCached.at < 60000 && money(jdCached.price) ? jdCached : null;
+    let jd = jdCached && now - jdCached.at < 60000 && money(jdCached.price) ? jdCached : null;
+    if (!jd) jd = await jdWebPrice(id);
     const configAt = prefs.valueForKey("jev:mmb_config_at") || "";
-    if (stamp && stamp.version === 29 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
+    if (stamp && stamp.version === 30 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) {
+      const notice = stamp.notice;
+      if (notice && typeof notice.body === "string") { showJdNotice(id, notice.title, notice.body); return; }
+    }
     // Only use this response's package description; never execute page JavaScript.
     const pack = String(html || "").match(/包装清单<\/span>[\s\S]{0,500}?class=["']content-block["'][^>]*>([\s\S]*?)<\/div>/);
     const landing = jdHtml(html, id);
-    const title = context && context.title || landing && landing.title || (pack ? text(pack[1], 200) : "京东商品 " + id);
+    const title = context && context.title || jd && jd.title || landing && landing.title || (pack ? text(pack[1], 200) : "京东商品 " + id);
+    timeoutNotice = ["🛍️ Jev 购物分析", text(title, 22), "🔥Jev决策分析：\n暂未取得分析结果\n查询超时，暂不提供购买建议。\n💡历史价格：\n" +
+      (jd ? priceRow("当前价格", jd.source === "京东网页" ? "京东网页" : "京东展示", jd.price) : "京东当前价格：未取得")];
     let external = null;
     let historyFailure = "这款商品暂无可用历史记录";
     const configured = Boolean(prefs.valueForKey("jev:mmb_config"));
@@ -509,6 +597,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       console.log("Jev：" + historyFailure);
     }
     if (finished) return;
+    timeoutNotice[2] += "\n" + (external ? priceSummary(external).join("\n") : historyFailure);
     const lines = ["🔥Jev决策分析：\n未运行 · 缺少当前价"];
     let analyzed = false;
     let resultLines = null;
@@ -518,46 +607,49 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const analysisKey = current ? "jev:reference:" + id + ":" + (jd ? "jd:" : "mmb:") + current.price : "";
     if (current && key && key !== "apikey_xxx") {
       const cached = load(analysisKey, null);
-      if (cached && cached.version === 29 && cached.configAt === configAt && now - cached.at < 600000) return;
+      if (cached && cached.version === 30 && cached.configAt === configAt && now - cached.at < 600000 && Array.isArray(cached.resultLines)) resultLines = cached.resultLines;
       lockKey = "jev:pending:reference:" + id;
       const pending = Number(prefs.valueForKey(lockKey));
       if (pending && now - pending < 20000) { lockKey = ""; return; }
       lockToken = String(now);
       prefs.setValueForKey(lockToken, lockKey);
       try {
-        const response = await queryJev({ platform: "jd", item_id: id, sku_id: id, title,
-          price: current.price, price_source: jd ? jd.source : "慢慢买第三方参考价", account_price_observed: false,
-          price_condition: "券、会员、地区、补贴条件未核实；不是当前账号到手价" },
-          { external, local: { observations: 0 }, external_price_conditions_verified: false }, key);
-        if (finished) return;
-        if (response.statusCode < 200 || response.statusCode >= 300) throw new Error("status");
-        const a = JSON.parse(response.body).answers;
-        if (!a || !a.action || !a.discount_score || !a.inflated ||
-          !["buy", "wait", "skip", "unsure"].includes(a.action.choice) ||
-          typeof a.action.confidence !== "number" || !Number.isFinite(a.action.confidence) || a.action.confidence < 0 || a.action.confidence > 1 ||
-          typeof a.discount_score.score !== "number" || !Number.isFinite(a.discount_score.score) || a.discount_score.score < 0 || a.discount_score.score > 5 ||
-          typeof a.inflated.noul !== "number" || !Number.isFinite(a.inflated.noul) || a.inflated.noul < 0 || a.inflated.noul > 1) throw new Error("schema");
-        // Force uncertainty: third-party price conditions and account price are unknown.
-        resultLines = readableAnswers(a, a.action.choice, analysisEvidence({ price: current.price, price_source: jd ? jd.source : "慢慢买第三方参考价", sku_id: id }, { external, local: { observations: 0 } }));
-        lines[0] = resultLines[0];
+        if (resultLines) { lines[0] = resultLines[0]; analyzed = true; }
+        else {
+          const response = await queryJev({ platform: "jd", item_id: id, sku_id: id, title,
+            price: current.price, price_source: jd ? jd.source : "慢慢买第三方参考价", account_price_observed: false,
+            price_condition: "券、会员、地区、补贴条件未核实；不是当前账号到手价" },
+            { external, local: { observations: 0 }, external_price_conditions_verified: false }, key);
+          if (finished) return;
+          if (response.statusCode < 200 || response.statusCode >= 300) throw new Error("status");
+          const a = JSON.parse(response.body).answers;
+          if (!a || !a.action || !a.discount_score || !a.inflated ||
+            !["buy", "wait", "skip", "unsure"].includes(a.action.choice) ||
+            typeof a.action.confidence !== "number" || !Number.isFinite(a.action.confidence) || a.action.confidence < 0 || a.action.confidence > 1 ||
+            typeof a.discount_score.score !== "number" || !Number.isFinite(a.discount_score.score) || a.discount_score.score < 0 || a.discount_score.score > 5 ||
+            typeof a.inflated.noul !== "number" || !Number.isFinite(a.inflated.noul) || a.inflated.noul < 0 || a.inflated.noul > 1) throw new Error("schema");
+          // Preserve reference decisions; completeness and price source stay explicit.
+          resultLines = readableAnswers(a, a.action.choice, analysisEvidence({ price: current.price, price_source: jd ? jd.source : "慢慢买第三方参考价", sku_id: id }, { external, local: { observations: 0 } }));
+          lines[0] = resultLines[0];
 
-        analyzed = true;
+          analyzed = true;
+        }
       } catch (_) { lines[0] = "🔥Jev决策分析：\n请求失败"; }
     } else if (current) lines[0] = "🔥Jev决策分析：\n未运行 · 尚未配置 API key";
 
     if (resultLines) lines.push(...resultLines.slice(1));
     else lines.push("本次未完成模型分析，没有购买建议。");
     lines.push("💡历史价格：");
-    if (jd) lines.push(priceRow("当前价格", "京东展示", jd.price));
+    if (jd) lines.push(priceRow("当前价格", jd.source === "京东网页" ? "京东网页" : "京东展示", jd.price));
     else if (reference) lines.push(priceRow("参考价格", "慢慢买", reference.price));
     if (external) lines.push(...priceSummary(external));
     else lines.push(configured ? "历史：" + historyFailure : "历史：尚未配置慢慢买");
 
     if (external && external.stale) lines.push("慢慢买缓存历史；本次刷新失败。");
     if (external) lines.push(jd ? "到手价与历史优惠条件待核。" : "账号价未取得，暂不作购买建议。");
-    notify("🛍️ Jev 购物分析", text(title, 22), lines.join("\n"));
-    if (analyzed) prefs.setValueForKey(JSON.stringify({ version: 29, at: now, configAt }), analysisKey);
-    prefs.setValueForKey(JSON.stringify({ version: 29, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
+    showJdNotice(id, title, lines.join("\n"));
+    if (analyzed) prefs.setValueForKey(JSON.stringify({ version: 30, at: now, configAt, resultLines }), analysisKey);
+    prefs.setValueForKey(JSON.stringify({ version: 30, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt, notice: { title, body: lines.join("\n") } }), stampKey);
   }
   async function run() {
     const url = String($request.url || "");
@@ -571,27 +663,50 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       }
       return;
     }
-    if (/^https?:\/\/api\.m\.jd\.com\//.test(url) && /[?&]functionId=mGetsByColor(?:&|$)/.test(url)) {
+    const jdApi = /^https?:\/\/api\.m\.jd\.com(?::443)?\//.test(url);
+    if (jdApi && typeof $response === "undefined") { captureJdRequest(url); return; }
+    if (jdApi && /[?&]functionId=mGetsByColor(?:&|$)/.test(url)) {
       captureJdPrices($response.body);
       return;
     }
     const graph = url.match(/^https?:\/\/(?:in\.m\.jd\.com\/product\/graphext|item\.m\.jd\.com\/product)\/(\d+)\.html/);
-    const platform = graph ? "jd" : /^https?:\/\/api\.m\.jd\.com\//.test(url) ? "jd" : /^https?:\/\/(?:trade-acs|h5api|acs)\.m\.taobao\.com\//.test(url) ? "taobao" : null;
+    const platform = graph ? "jd" : jdApi ? "jd" : /^https?:\/\/(?:trade-acs|h5api|acs)\.m\.taobao\.com\//.test(url) ? "taobao" : null;
     if (!platform) return;
-    // QX request-header rule starts graph history before HTML returns.
+    // Request hooks are metadata-only; analysis starts after the response.
     if (graph && typeof $response === "undefined") {
-      const context = load("jev:jd_context:" + graph[1], null);
-      await graphFallback(graph[1], "", context && String(context.item_id) === graph[1] ? context : null);
+      console.log("[Jev] v30 京东图文入口已命中 · 等待响应 · " + graph[1]);
       return;
     }
     if (typeof $response === "undefined") return;
     const landing = graph ? jdHtml($response.body, graph[1]) : null;
-    const product = graph ? (landing && landing.price ? { ...landing, captured_at: Date.now() } : load("jev:jd_context:" + graph[1], null)) : (platform === "jd" ? (/(?:^|[?&])functionId=pc_detailpage_wareBusiness(?:&|$)/.test(url + "&" + ($request.body || "")) ? jdPcDetail(parseBody($response.body), url, $request.body) : (/(?:^|[?&])functionId=wareBusiness(?:&|$)/.test(url + "&" + ($request.body || "")) ? jdEntryDetail(parseBody($response.body), url, $request.body) : jdDetail(parseBody($response.body)))) : taobaoDetail(parseBody($response.body)));
+    const requestInfo = jdApi ? correlatedJdRequest(url) : null;
+    if (requestInfo && requestInfo.conflict) { console.log("[Jev] v30 京东会话商品冲突，未引用价格"); return; }
+    const requestBody = requestInfo ? "functionId=" + requestInfo.functionId + "&body=" + encodeURIComponent(JSON.stringify({ skuId: requestInfo.id })) : $request.body;
+    const requestUrl = requestInfo ? url.split("?")[0] + "?functionId=" + requestInfo.functionId : url;
+    let responseData = null;
+    if (!graph) {
+      try { responseData = parseBody($response.body); }
+      catch (_) {
+        if (jdApi && requestInfo) {
+          console.log("[Jev] v30 商品响应无法解析，独立查询同商品网页及历史 · " + requestInfo.id);
+          await graphFallback(requestInfo.id, "");
+        }
+        return;
+      }
+    }
+    const product = graph ? (landing && landing.price ? { ...landing, captured_at: Date.now() } : load("jev:jd_context:" + graph[1], null)) :
+      platform === "jd" ? (requestInfo && requestInfo.functionId === "pc_detailpage_wareBusiness" ? jdPcDetail(responseData, requestUrl, requestBody) :
+        requestInfo && requestInfo.functionId === "wareBusiness" ? jdEntryDetail(responseData, requestUrl, requestBody) : jdDetail(responseData)) : taobaoDetail(responseData);
+    if (jdApi && requestInfo) console.log("[Jev] v30 京东商品响应 · " + requestInfo.id + " · " + (product ? product.price ? "已取得展示价" : "缺少价格，查询同商品网页及历史" : "未识别或商品冲突"));
     if (graph && (!product || !product.captured_at || Date.now() - product.captured_at > 60000 || !product.title || !product.price || !product.item_id || String(product.sku_id || product.item_id) !== graph[1])) {
       await graphFallback(graph[1], $response.body);
       return;
     }
-    if (!product) return;
+    if (!product) {
+      if (jdApi && /[?&]functionId=(?:wareBusiness|pc_detailpage_wareBusiness)(?:&|$)/.test(url) && !requestInfo)
+        console.log("[Jev] v30 商品响应未识别编号，请检查请求体规则是否命中及 sessionIndex");
+      return;
+    }
     if (platform === "jd" && !product.price) { await graphFallback(product.sku_id || product.item_id, "", product); return; }
     if (platform === "taobao" && !product.price) { await taobaoHistoryOnly(product); return; }
     // Fail closed on incomplete or ambiguous product identification.
@@ -600,13 +715,13 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (platform === "jd" && !product.price_source) product.price_source = "京东商品详情接口";
     if (platform === "jd" && !graph) prefs.setValueForKey(JSON.stringify({ ...product, captured_at: Date.now() }), "jev:jd_context:" + (product.sku_id || product.item_id));
     if (graph && (!product.captured_at || Date.now() - product.captured_at > 60000)) return;
-    if (graph && landing && landing.price) {
-      prefs.setValueForKey(JSON.stringify({ ...product, captured_at: Date.now() }), "jev:jd_context:" + graph[1]);
-      prefs.setValueForKey(JSON.stringify({ price: product.price, at: Date.now(), source: product.price_source, account_price_observed: false }), "jev:jd_price:" + graph[1]);
+    if (platform === "jd" && product.price) {
+      prefs.setValueForKey(JSON.stringify({ ...product, captured_at: Date.now() }), "jev:jd_context:" + product.item_id);
+      prefs.setValueForKey(JSON.stringify({ price: product.price, at: Date.now(), source: product.price_source, account_price_observed: false }), "jev:jd_price:" + product.item_id);
     }
     timeoutNotice = ["🛍️ Jev 购物分析", text(product.title, 22),
       "🔥Jev决策分析：\n暂未取得分析结果\n查询超时，暂不提供购买建议。\n💡历史价格：\n" +
-      priceRow("当前价格", platform === "jd" ? "京东展示" : "淘宝展示", product.price) + "\n历史查询尚未完成。"];
+      priceRow("当前价格", platform === "jd" ? product.price_source === "京东移动商品页" ? "京东网页" : "京东展示" : "淘宝展示", product.price) + "\n历史查询尚未完成。"];
     const condition = product.price_condition || "展示价，优惠条件未确认";
     const identity = [platform, product.item_id, product.sku_id || product.item_id, condition].join(":");
     const historyKey = "jev:history:" + identity;
@@ -626,7 +741,11 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const cacheKey = "jev:" + product.title + ":" + product.price;
     const cached = load(cacheKey, null);
     const configAt = prefs.valueForKey("jev:mmb_config_at") || "";
-    if (cached && cached.identity === identity && cached.version === 29 && cached.configAt === configAt && now - cached.at < 600000) return;
+    if (cached && cached.identity === identity && cached.version === 30 && cached.configAt === configAt && now - cached.at < 600000 && cached.notice) {
+      if (platform === "jd") showJdNotice(product.item_id, product.title, cached.notice);
+      else notify("🛍️ Jev 购物分析", text(product.title, 22), cached.notice);
+      return;
+    }
     lockKey = "jev:pending:" + identity;
     const pending = Number(prefs.valueForKey(lockKey));
     if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -642,7 +761,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     }
     if (finished) return;
     timeoutNotice[2] = "🔥Jev决策分析：\n暂未取得分析结果\n模型查询超时，暂不提供购买建议。\n💡历史价格：\n" +
-      [priceRow("当前价格", platform === "jd" ? "京东展示" : "淘宝展示", product.price),
+      [priceRow("当前价格", platform === "jd" ? product.price_source === "京东移动商品页" ? "京东网页" : "京东展示" : "淘宝展示", product.price),
         ...(external ? priceSummary(external) : [historyFailure])].join("\n");
     const history = { local: localHistory, external, external_price_conditions_verified: false };
     let explanations = ["🔥Jev决策分析：\n未运行", "尚未配置 API key。"];
@@ -663,14 +782,15 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
         explanations = ["🔥Jev决策分析：\n暂未取得分析结果", "模型请求失败，暂不提供购买建议。"];
       }
     }
-    const lines = [...explanations, "💡历史价格：", priceRow("当前价格", platform === "jd" ? "京东展示" : "淘宝展示", product.price)];
+    const lines = [...explanations, "💡历史价格：", priceRow("当前价格", platform === "jd" ? product.price_source === "京东移动商品页" ? "京东网页" : "京东展示" : "淘宝展示", product.price)];
     if (external) lines.push(...priceSummary(external));
     else if (previous.length) lines.push("本地低 ¥" + localHistory.lowest.toFixed(2) + " · " + previous.length + "次记录");
     else lines.push(historyFailure);
     lines.push(external ? (external.stale ? "慢慢买缓存 · 条件待核" : "慢慢买历史 · 条件待核") : "本地浏览记录，非完整历史。");
     if (finished) return;
-    notify("🛍️ Jev 购物分析", text(product.title, 22), lines.join("\n"));
-    if (action) prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 29, configAt }), cacheKey);
+    if (platform === "jd") showJdNotice(product.item_id, product.title, lines.join("\n"));
+    else notify("🛍️ Jev 购物分析", text(product.title, 22), lines.join("\n"));
+    if (action) prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 30, configAt, notice: lines.join("\n") }), cacheKey);
   }
   run().catch(function () { console.log("Jev：本次分析失败，原样放行"); }).then(finish);
 })();
