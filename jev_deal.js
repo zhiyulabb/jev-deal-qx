@@ -206,7 +206,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (low) lines.push(show("历史低", low, true));
     if (recent) lines.push(show("30天低", recent, true));
     const festival = [["618", get("618价格")], ["双11", get("双11价格")]].filter(x => x[1]);
-    if (festival.length) lines.push(festival.map(([label, row]) => show(label, row, false) + (row.date ? "(" + row.date.slice(0, 4) + ")" : "")).join(" · "));
+    for (const [label, row] of festival) lines.push(show(label, row, true));
     if (!lines.length) {
       for (const [label, name] of [["60天低", "60天最低价"], ["180天低", "180天最低价"]]) {
         const row = get(name);
@@ -354,7 +354,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const jdCached = load("jev:jd_price:" + id, null);
     const jd = jdCached && now - jdCached.at < 60000 && money(jdCached.price) ? jdCached : null;
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
-    if (stamp && stamp.version === 9 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
+    if (stamp && stamp.version === 10 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
     // Only use this response's package description; never execute page JavaScript.
     const pack = String(html || "").match(/包装清单<\/span>[\s\S]{0,500}?class=["']content-block["'][^>]*>([\s\S]*?)<\/div>/);
     const landing = jdHtml(html, id);
@@ -378,7 +378,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const analysisKey = current ? "jev:reference:" + id + ":" + (jd ? "jd:" : "mmb:") + current.price : "";
     if (current && key && key !== "apikey_xxx") {
       const cached = load(analysisKey, null);
-      if (cached && cached.version === 9 && cached.configAt === configAt) return;
+      if (cached && cached.version === 10 && cached.configAt === configAt) return;
       lockKey = "jev:pending:reference:" + id;
       const pending = Number($prefs.valueForKey(lockKey));
       if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -414,8 +414,8 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
 
     if (external) lines.push(jd ? "到手价与历史优惠条件待核。" : "账号价未取得，暂不作购买建议。");
     $notify("📉 Jev 购物分析", text(title, 36), lines.join("\n"));
-    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 9, configAt }), analysisKey);
-    $prefs.setValueForKey(JSON.stringify({ version: 9, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
+    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 10, configAt }), analysisKey);
+    $prefs.setValueForKey(JSON.stringify({ version: 10, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
   }
   async function run() {
     const url = String($request.url || "");
@@ -468,7 +468,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const cacheKey = "jev:" + product.title + ":" + product.price;
     const cached = load(cacheKey, null);
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
-    if (cached && cached.identity === identity && cached.version === 9 && cached.configAt === configAt) return;
+    if (cached && cached.identity === identity && cached.version === 10 && cached.configAt === configAt) return;
     lockKey = "jev:pending:" + identity;
     const pending = Number($prefs.valueForKey(lockKey));
     if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -498,7 +498,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     lines.push(external ? "历史来自慢慢买，优惠条件待核。" : "本地浏览记录，非完整历史。");
     if (finished) return;
     $notify("📉 Jev 购物分析", text(product.title, 36), lines.join("\n"));
-    $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 9, configAt }), cacheKey);
+    $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 10, configAt }), cacheKey);
   }
   run().catch(function () { console.log("Jev：本次分析失败，原样放行"); }).then(finish);
 })();
