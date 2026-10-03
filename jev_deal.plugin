@@ -1,0 +1,18 @@
+#!name=Jev 购物分析
+#!desc=京东、淘宝商品价格与慢慢买历史价分析；触发取决于实际可解密的商品接口。
+#!author=zhiyulabb
+#!homepage=https://github.com/zhiyulabb/jev-deal-qx
+#!loon_version=3.2.1(734)
+
+[Argument]
+apiKey = input,"YOUR_API_KEY",tag=Jev API key,desc=仅在本机填写；不要分享含真实 key 的配置
+
+[Script]
+http-response ^https?:\/\/api\.m\.jd\.com\/(?:client\.action|api)?(?:\?|$) script-path=https://raw.githubusercontent.com/zhiyulabb/jev-deal-qx/6a043822e5f38f69f8bb55ca8860e9263906dab1/jev_deal.js,requires-body=1,timeout=20,argument=[{apiKey}],tag=Jev-1
+http-response ^https?:\/\/(?:trade-acs|h5api|acs)\.m\.taobao\.com\/(?:gw|h5)\/mtop\.taobao\.detail\.(?:getdetail|data\.get)(?:\/|\?|$) script-path=https://raw.githubusercontent.com/zhiyulabb/jev-deal-qx/6a043822e5f38f69f8bb55ca8860e9263906dab1/jev_deal.js,requires-body=1,timeout=20,argument=[{apiKey}],tag=Jev-2
+http-response ^https?:\/\/in\.m\.jd\.com\/product\/graphext\/\d+\.html script-path=https://raw.githubusercontent.com/zhiyulabb/jev-deal-qx/6a043822e5f38f69f8bb55ca8860e9263906dab1/jev_deal.js,requires-body=1,timeout=20,argument=[{apiKey}],tag=Jev-3
+http-response ^https?:\/\/item\.m\.jd\.com\/product\/\d+\.html script-path=https://raw.githubusercontent.com/zhiyulabb/jev-deal-qx/6a043822e5f38f69f8bb55ca8860e9263906dab1/jev_deal.js,requires-body=1,timeout=20,argument=[{apiKey}],tag=Jev-4
+http-request ^https?:\/\/apapia-sqk-weblogic\.manmanbuy\.com\/baoliao\/center\/menu$ script-path=https://raw.githubusercontent.com/zhiyulabb/jev-deal-qx/6a043822e5f38f69f8bb55ca8860e9263906dab1/jev_deal.js,requires-body=1,timeout=20,argument=[{apiKey}],tag=Jev-5
+
+[MITM]
+hostname = jd.com, *.jd.com, taobao.com, *.taobao.com, apapia-sqk-weblogic.manmanbuy.com
