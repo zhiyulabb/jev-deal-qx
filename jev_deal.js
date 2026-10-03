@@ -24,6 +24,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
   let finished = false;
   let lockKey = "";
   let lockToken = "";
+  let historyStage = "商品匹配";
   const historyDeadline = Date.now() + 9500;
   const timer = setTimeout(finish, 15000); // 历史价链路 + Jev 的总保护时间。
   function finish() {
@@ -151,6 +152,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     } finally { clearTimeout(expiry); }
   }
   async function mmbRequest(params, path, common) {
+    historyStage = path.includes("priceRemark") ? "价格摘要" : path.includes("getHistoryTrend") ? "价格走势" : "商品匹配";
     if (finished || Date.now() >= historyDeadline) throw new Error("History deadline exceeded");
     const saved = formParse($prefs.valueForKey("jev:mmb_config"));
     if (!saved.c_mmbDevId) throw new Error("Missing MMB configuration");
@@ -253,14 +255,19 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const jdCached = load("jev:jd_price:" + id, null);
     const jd = jdCached && now - jdCached.at < 60000 && money(jdCached.price) ? jdCached : null;
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
-    if (stamp && stamp.version === 4 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
+    if (stamp && stamp.version === 5 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
     // Only use this response's package description; never execute page JavaScript.
     const pack = String(html || "").match(/包装清单<\/span>[\s\S]{0,500}?class=["']content-block["'][^>]*>([\s\S]*?)<\/div>/);
     const title = pack ? text(pack[1], 200) : "京东商品 " + id;
     let external = null;
+    let historyFailure = "这款商品暂无可用历史记录";
     const configured = Boolean($prefs.valueForKey("jev:mmb_config"));
     try { external = await getExternalHistory({ platform: "jd", item_id: id, sku_id: id }); }
-    catch (_) { console.log("Jev：图文详情历史价查询失败"); }
+    catch (error) {
+      const message = String(error && error.message || "");
+      historyFailure = /mismatch/.test(message) ? "返回商品不一致，已停止引用价格" : /product missing|parse failed/.test(message) ? "慢慢买未匹配到这款商品" : /trend missing/.test(message) ? "慢慢买未返回价格走势" : /configuration/.test(message) ? "慢慢买配置不完整，请重新获取" : /Timeout|deadline/.test(message) ? historyStage + "查询超时，请稍后重试" : historyStage + "查询失败，请稍后重试";
+      console.log("Jev：" + historyFailure);
+    }
     if (finished) return;
     const lines = ["Jev：未运行 · 缺少当前价"];
     let analyzed = false;
@@ -270,7 +277,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const analysisKey = current ? "jev:reference:" + id + ":" + (jd ? "jd:" : "mmb:") + current.price : "";
     if (current && key && key !== "apikey_xxx") {
       const cached = load(analysisKey, null);
-      if (cached && cached.version === 4 && cached.configAt === configAt) return;
+      if (cached && cached.version === 5 && cached.configAt === configAt) return;
       lockKey = "jev:pending:reference:" + id;
       const pending = Number($prefs.valueForKey(lockKey));
       if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -300,11 +307,11 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (jd) lines.push("京东展示价 ¥" + jd.price.toFixed(2) + " · 券补贴未确认");
     if (external) {
       lines.push(...compactHistory(external), "来源：慢慢买");
-    } else lines.push(configured ? "历史价格：查询失败或无可用记录" : "历史价格：尚未配置慢慢买");
-    lines.push("", "── 结果说明 ──", analyzed ? (jd ? "已取得京东展示价，但券、补贴及历史优惠条件未核实，暂不能确认到手价优势。" : resultExplanation("unsure", true)) : "本次未完成 Jev 分析；上述价格仅供查询参考。");
+    } else lines.push(configured ? "历史价格：" + historyFailure : "历史价格：尚未配置慢慢买");
+    lines.push("", "── 结果说明 ──", analyzed ? (jd ? "已取得京东展示价，但券、补贴及历史优惠条件未核实，暂不能确认到手价优势。" : resultExplanation("unsure", true)) : external || jd ? "本次未完成 Jev 分析；已有价格仅供参考。" : "未取得当前价和历史价，本次没有形成购买建议。");
     $notify("📉 Jev 购物分析", title, lines.join("\n"));
-    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 4, configAt }), analysisKey);
-    $prefs.setValueForKey(JSON.stringify({ version: 4, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
+    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 5, configAt }), analysisKey);
+    $prefs.setValueForKey(JSON.stringify({ version: 5, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
   }
   async function run() {
     const url = String($request.url || "");
