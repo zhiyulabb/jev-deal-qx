@@ -48,8 +48,9 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
   function extract(root, platform) {
     const found = {};
     let visited = 0;
+    const productIds = new Set();
     const aliases = {
-      title: ["wareName", "itemTitle", "title", "name"],
+      title: ["wareName", "itemTitle", "skuName", "title", "name"],
       price: ["jdPrice", "price", "priceText"],
       original_price: ["marketPrice", "originalPrice", "oldPrice"],
       promotion: ["promotion", "promoText", "discountDesc"],
@@ -65,6 +66,11 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
         return;
       }
       if (!node || typeof node !== "object" || Array.isArray(node)) return;
+      if (platform === "jd") {
+        for (const idKey of ["wareId", "skuId", "skuID"]) {
+          if (/^\d+$/.test(String(node[idKey]))) productIds.add(String(node[idKey]));
+        }
+      }
       for (const field of Object.keys(aliases)) {
         for (let rank = 0; rank < aliases[field].length; rank++) {
           const key = aliases[field][rank];
@@ -75,7 +81,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
           else value = text(raw, field === "promotion" ? 400 : 160);
           if (!value) continue;
           // Generic name/price only allowed in known current-product containers.
-          const productPath = /(?:^|\.)(?:item|ware|wareInfo|basicInfo|priceInfo|price)(?:\.|$)/i.test(path);
+          const productPath = /(?:^|\.)(?:item|ware|wareInfo|basicInfo|priceInfo|price|jdPrice)(?:\.|$)/i.test(path);
           if ((key === "name" || (key === "price" && typeof raw !== "number")) && !productPath) continue;
           const priority = rank * 10 + depth;
           if (!found[field] || priority < found[field].priority) found[field] = { value, priority };
@@ -87,6 +93,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       }
     }
     walk(root, 0, "");
+    if (platform === "jd" && productIds.size > 1) return null;
     const out = { platform };
     for (const field of Object.keys(aliases)) out[field] = found[field] ? found[field].value : null;
     return out;
@@ -327,6 +334,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     // Fail closed on incomplete or ambiguous product identification.
     if (!product.title || !product.price || !product.item_id) return;
     if (platform === "taobao" && !product.sku_id) return;
+    if (platform === "jd") product.price_source = "京东商品详情接口";
     if (platform === "jd" && !graph) $prefs.setValueForKey(JSON.stringify({ ...product, captured_at: Date.now() }), "jev:jd_context:" + (product.sku_id || product.item_id));
     if (graph && (!product.captured_at || Date.now() - product.captured_at > 60000)) return;
     const condition = product.price_condition || "展示价，优惠条件未确认";
@@ -371,7 +379,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     let action = a.action.choice;
     if (confidence < 0.55 || !previous.length || !product.price_condition) action = "unsure";
     const labels = { buy: "可以考虑", wait: "建议等等", skip: "建议跳过", unsure: "信息不足" };
-    const lines = ["Jev：" + labels[action] + " · 优惠证据 " + score.toFixed(1) + "/5", "当前展示价：¥" + product.price.toFixed(2), "价格条件：" + condition];
+    const lines = ["Jev：" + labels[action] + " · 优惠证据 " + score.toFixed(1) + "/5", (platform === "jd" ? "京东展示价：¥" : "当前展示价：¥") + product.price.toFixed(2), "价格条件：" + condition];
     if (external) {
       lines.push(...compactHistory(external), "来源：慢慢买 · 条件未核实");
     }
