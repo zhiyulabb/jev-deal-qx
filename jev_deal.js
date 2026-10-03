@@ -2,31 +2,9 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
 
 // Quantumult X script-response-body. Every exit preserves the original response.
 (function () {
-  // Runtime adapters keep QX and Loon on one parser implementation.
-  const prefs = typeof $prefs !== "undefined" ? $prefs : {
-    valueForKey: key => $persistentStore.read(key),
-    setValueForKey: (value, key) => $persistentStore.write(String(value), key),
-    removeValueForKey: key => $persistentStore.write("", key)
-  };
-  const notify = typeof $notify === "function" ? $notify :
-    (title, subtitle, body) => $notification.post(title, subtitle, body);
-  const fetchRequest = typeof $task !== "undefined" ? options => $task.fetch(options) :
-    options => new Promise((resolve, reject) => {
-      const method = String(options.method || "GET").toLowerCase();
-      if (typeof $httpClient[method] !== "function") { reject(new Error("Unsupported method")); return; }
-      $httpClient[method]({ ...options, timeout: 5000 }, (error, response, body) => {
-        if (error) { reject(new Error("Network request failed")); return; }
-        resolve({ statusCode: response.status, headers: response.headers, body });
-      });
-    });
-  if (typeof $loon !== "undefined" && typeof $argument !== "undefined") {
-    try {
-      const args = typeof $argument === "string" ? JSON.parse($argument) : $argument;
-      const key = Array.isArray(args) ? args[0] : args && args.apiKey;
-      if (typeof key === "string" && key.trim() && key !== "YOUR_API_KEY" && !/[\s,#&]/.test(key))
-        prefs.setValueForKey(key, "jev:api_key");
-    } catch (_) {}
-  }
+  const prefs = $prefs;
+  const notify = $notify;
+  const fetchRequest = options => $task.fetch(options);
   // One-shot QX task setup. URL fragments stay on the device, not in HTTP requests.
   if (typeof $request === "undefined") {
     try {
@@ -600,7 +578,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const graph = url.match(/^https?:\/\/(?:in\.m\.jd\.com\/product\/graphext|item\.m\.jd\.com\/product)\/(\d+)\.html/);
     const platform = graph ? "jd" : /^https?:\/\/api\.m\.jd\.com\//.test(url) ? "jd" : /^https?:\/\/(?:trade-acs|h5api|acs)\.m\.taobao\.com\//.test(url) ? "taobao" : null;
     if (!platform) return;
-    // Loon reference plugin starts graph history on request, before HTML returns.
+    // QX request-header rule starts graph history before HTML returns.
     if (graph && typeof $response === "undefined") {
       const context = load("jev:jd_context:" + graph[1], null);
       await graphFallback(graph[1], "", context && String(context.item_id) === graph[1] ? context : null);
