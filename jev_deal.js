@@ -212,6 +212,12 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       } })
     }, 5000);
   }
+  function compactHistory(external) {
+    const labels = { "当前到手价": "参考价", "历史最低价": "历史低", "30天最低价": "30天低", "60天最低价": "60天低", "180天最低价": "180天低", "618价格": "618", "双11价格": "双11" };
+    const order = ["当前到手价", "历史最低价", "30天最低价", "60天最低价", "180天最低价", "618价格", "双11价格"];
+    const rows = order.map(label => external.entries.find(r => r.label === label)).filter(Boolean);
+    return rows.map(row => labels[row.label] + " ¥" + row.price.toFixed(2) + (row.date ? " · " + row.date.replace(/\//g, "-") : ""));
+  }
   async function graphFallback(id, html) {
     const stampKey = "jev:graph_notice:" + id;
     const now = Date.now();
@@ -226,7 +232,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     try { external = await getExternalHistory({ platform: "jd", item_id: id, sku_id: id }); }
     catch (_) { console.log("Jev：图文详情历史价查询失败"); }
     if (finished) return;
-    const lines = ["Jev：未运行 · 缺少当前价格", "当前账号展示价：未获取"];
+    const lines = ["Jev：未运行 · 缺少当前价"];
     let analyzed = false;
     const reference = external && external.entries.find(row => row.label === "当前到手价" && money(row.price));
     const key = $prefs.valueForKey("jev:api_key") || API_KEY;
@@ -253,17 +259,16 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
           typeof a.discount_score.score !== "number" || !Number.isFinite(a.discount_score.score) || a.discount_score.score < 0 || a.discount_score.score > 5 ||
           typeof a.inflated.noul !== "number" || !Number.isFinite(a.inflated.noul) || a.inflated.noul < 0 || a.inflated.noul > 1) throw new Error("schema");
         // Force uncertainty: third-party price conditions and account price are unknown.
-        lines[0] = "Jev：信息不足 · 优惠证据 " + a.discount_score.score.toFixed(1) + "/5（参考价分析）";
-        lines.splice(1, 0, "未取得账号到手价，无法确认同条件优惠");
+        lines[0] = "Jev：信息不足 · 证据 " + a.discount_score.score.toFixed(1) + "/5";
+
         analyzed = true;
       } catch (_) { lines[0] = "Jev：请求失败 · 历史价仍可查看"; }
     } else if (reference) lines[0] = "Jev：未运行 · 尚未配置 API key";
 
     if (external) {
-      for (const row of external.entries) lines.push("慢慢买" + row.label + "：¥" + row.price.toFixed(2) + (row.date ? " · " + row.date : " · 日期未提供"));
-      lines.push("来源：慢慢买 · 优惠条件未核实", "第三方当前价不代表你的账号到手价");
+      lines.push(...compactHistory(external), "慢慢买参考 · 账号价未取，条件未核实");
     } else lines.push(configured ? "历史价格：查询失败或无可用记录" : "历史价格：尚未配置慢慢买");
-    $notify("Jev 商品价格信息", title, lines.join("\n"));
+    $notify("📉 Jev 购物分析", title, lines.join("\n"));
     if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 3, configAt }), analysisKey);
     $prefs.setValueForKey(JSON.stringify({ version: 3, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
   }
@@ -337,8 +342,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const labels = { buy: "可以考虑", wait: "建议等等", skip: "建议跳过", unsure: "信息不足" };
     const lines = ["Jev：" + labels[action] + " · 优惠证据 " + score.toFixed(1) + "/5", "当前展示价：¥" + product.price.toFixed(2), "价格条件：" + condition];
     if (external) {
-      for (const row of external.entries) lines.push("慢慢买" + row.label + "：¥" + row.price.toFixed(2) + (row.date ? " · " + row.date : " · 日期未提供"));
-      lines.push("来源：慢慢买 · 优惠条件未核实");
+      lines.push(...compactHistory(external), "来源：慢慢买 · 条件未核实");
     }
     if (previous.length) {
       const lowest = localHistory.lowest;
@@ -348,7 +352,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       lines.push("来源：本地浏览记录 · " + previous.length + "条 · 非完整历史");
     } else if (!external) lines.push("历史价格：数据不足", "来源：本地记录，首次浏览");
     if (finished) return;
-    $notify("Jev 双11购物分析", product.title, lines.join("\n"));
+    $notify("📉 Jev 购物分析", product.title, lines.join("\n"));
     $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 2, configAt }), cacheKey);
   }
   run().catch(function () { console.log("Jev：本次分析失败，原样放行"); }).then(finish);
