@@ -105,27 +105,37 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     return JSON.parse(match ? match[1] : raw);
   }
   function jdDetail(root) {
-    if (!root || !Array.isArray(root.floors)) return extract(root, "jd");
-    const candidates = [];
-    for (const floor of root.floors.slice(0, 100)) {
-      const d = floor && floor.data;
-      if (!d) continue;
+    if (!root || typeof root !== "object") return null;
+    // Only known detail containers; never collect identities from recommendations
+    // or from the app's JDProductDetail preload/configuration templates.
+    const body = Array.isArray(root.floors) || root.others || root.commonBaseInfo ? root :
+      root.data && (Array.isArray(root.data.floors) || root.data.others || root.data.commonBaseInfo) ? root.data : null;
+    if (!body) {
+      const result = extract(root, "jd");
+      return result && result.item_id ? { ...result, title: result.title || "京东商品 " + result.item_id } : null;
+    }
+    const containers = (Array.isArray(body.floors) ? body.floors.slice(0, 100).map(floor => floor && floor.data) : [])
+      .concat([body.others, body.commonBaseInfo && body.commonBaseInfo.data || body.commonBaseInfo]);
+    const identities = [], candidates = [];
+    for (const d of containers) {
+      if (!d || typeof d !== "object") continue;
       const share = d.property && typeof d.property.shareUrl === "string" ? d.property.shareUrl.match(/(?:\/product\/|item\.jd\.com\/)(\d+)\.html/) : null;
       const sku = d.wareInfo && /^\d+$/.test(String(d.wareInfo.skuId)) ? String(d.wareInfo.skuId) : null;
-      if (share && sku && share[1] !== sku) continue;
-      const match = share || (sku ? [null, sku] : null);
-      const price = d.priceInfo && money(d.priceInfo.jprice);
-      if (!match || !price) continue;
+      if (share && sku && share[1] !== sku) return null;
+      const id = share ? share[1] : sku;
+      if (!id) continue;
       const result = extract(d, "jd", 2);
-      if (!result) continue;
-      if (result.item_id && result.item_id !== match[1]) continue;
-      const title = result.title || text(d.wareInfo && (d.wareInfo.wname || d.wareInfo.wareName), 160) || "京东商品 " + match[1];
-      candidates.push({ ...result, platform: "jd", item_id: match[1], sku_id: match[1], title, price,
-        price_source: "京东商品详情接口", price_condition: result.price_condition || null, account_price_observed: true });
+      if (result && result.item_id && result.item_id !== id) return null;
+      const title = text(d.wareInfo && (d.wareInfo.wname || d.wareInfo.wareName || d.wareInfo.name), 160) || result && result.title || "京东商品 " + id;
+      identities.push({ platform: "jd", item_id: id, sku_id: id, title, price: null, account_price_observed: false });
+      const price = money(d.priceInfo && d.priceInfo.jprice);
+      if (price) candidates.push({ ...result, platform: "jd", item_id: id, sku_id: id, title, price,
+        price_source: "京东商品详情接口", price_condition: result && result.price_condition || null, account_price_observed: true });
     }
-    const ids = new Set(candidates.map(p => p.item_id));
+    if (new Set(identities.map(p => p.item_id)).size !== 1) return null;
     const prices = new Set(candidates.map(p => p.price));
-    return ids.size === 1 && prices.size === 1 ? candidates[0] : null;
+    if (prices.size === 1) return candidates[0];
+    return identities.find(p => !p.title.startsWith("京东商品 ")) || identities[0];
   }
   function taobaoDetail(root) {
     const raw = root && root.data;
@@ -157,7 +167,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
     const stamp = load(stampKey, null);
     const now = Date.now();
-    if (stamp && stamp.version === 23 && stamp.configAt === configAt && now - stamp.at < 60000) return;
+    if (stamp && stamp.version === 24 && stamp.configAt === configAt && now - stamp.at < 60000) return;
     lockKey = "jev:pending:taobao_history:" + product.item_id;
     const pending = Number($prefs.valueForKey(lockKey));
     if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -177,7 +187,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       lines.push(...priceSummary(external), external.stale ? "慢慢买缓存历史；本次刷新失败，优惠条件待核。" : "历史来自慢慢买，优惠条件待核。");
     } else lines.push(reason);
     $notify("🛍️ Jev 购物分析", text(product.title, 36), lines.join("\n"));
-    $prefs.setValueForKey(JSON.stringify({ version: 23, configAt, at: now }), stampKey);
+    $prefs.setValueForKey(JSON.stringify({ version: 24, configAt, at: now }), stampKey);
   }
   function jdHtml(html, id) {
     // Known JSON assignments only; never execute page JavaScript or decode price fonts.
@@ -389,18 +399,18 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       $prefs.setValueForKey(JSON.stringify({ price: money(row.p), at: Date.now(), source: "京东批量价格接口", account_price_observed: false }), "jev:jd_price:" + row.id);
     }
   }
-  async function graphFallback(id, html) {
+  async function graphFallback(id, html, context) {
     const stampKey = "jev:graph_notice:" + id;
     const now = Date.now();
     const stamp = load(stampKey, null);
     const jdCached = load("jev:jd_price:" + id, null);
     const jd = jdCached && now - jdCached.at < 60000 && money(jdCached.price) ? jdCached : null;
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
-    if (stamp && stamp.version === 23 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
+    if (stamp && stamp.version === 24 && stamp.configAt === configAt && stamp.jdPrice === (jd ? jd.price : null) && now - stamp.at < stamp.ttl) return;
     // Only use this response's package description; never execute page JavaScript.
     const pack = String(html || "").match(/包装清单<\/span>[\s\S]{0,500}?class=["']content-block["'][^>]*>([\s\S]*?)<\/div>/);
     const landing = jdHtml(html, id);
-    const title = landing && landing.title || (pack ? text(pack[1], 200) : "京东商品 " + id);
+    const title = context && context.title || landing && landing.title || (pack ? text(pack[1], 200) : "京东商品 " + id);
     let external = null;
     let historyFailure = "这款商品暂无可用历史记录";
     const configured = Boolean($prefs.valueForKey("jev:mmb_config"));
@@ -420,7 +430,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const analysisKey = current ? "jev:reference:" + id + ":" + (jd ? "jd:" : "mmb:") + current.price : "";
     if (current && key && key !== "apikey_xxx") {
       const cached = load(analysisKey, null);
-      if (cached && cached.version === 23 && cached.configAt === configAt) return;
+      if (cached && cached.version === 24 && cached.configAt === configAt) return;
       lockKey = "jev:pending:reference:" + id;
       const pending = Number($prefs.valueForKey(lockKey));
       if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -458,8 +468,8 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     if (external && external.stale) lines.push("慢慢买缓存历史；本次刷新失败。");
     if (external) lines.push(jd ? "到手价与历史优惠条件待核。" : "账号价未取得，暂不作购买建议。");
     $notify("🛍️ Jev 购物分析", text(title, 36), lines.join("\n"));
-    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 23, configAt }), analysisKey);
-    $prefs.setValueForKey(JSON.stringify({ version: 23, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
+    if (analyzed) $prefs.setValueForKey(JSON.stringify({ version: 24, configAt }), analysisKey);
+    $prefs.setValueForKey(JSON.stringify({ version: 24, jdPrice: jd ? jd.price : null, at: now, ttl: analyzed || !reference ? (external ? 600000 : 60000) : 60000, configAt }), stampKey);
   }
   async function run() {
     const url = String($request.url || "");
@@ -487,6 +497,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
       return;
     }
     if (!product) return;
+    if (platform === "jd" && !product.price) { await graphFallback(product.sku_id || product.item_id, "", product); return; }
     if (platform === "taobao" && !product.price) { await taobaoHistoryOnly(product); return; }
     // Fail closed on incomplete or ambiguous product identification.
     if (!product.title || !product.price || !product.item_id) return;
@@ -513,7 +524,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     const cacheKey = "jev:" + product.title + ":" + product.price;
     const cached = load(cacheKey, null);
     const configAt = $prefs.valueForKey("jev:mmb_config_at") || "";
-    if (cached && cached.identity === identity && cached.version === 23 && cached.configAt === configAt) return;
+    if (cached && cached.identity === identity && cached.version === 24 && cached.configAt === configAt) return;
     lockKey = "jev:pending:" + identity;
     const pending = Number($prefs.valueForKey(lockKey));
     if (pending && now - pending < 20000) { lockKey = ""; return; }
@@ -555,7 +566,7 @@ const API_KEY = "apikey_xxx"; // 公共仓库只保留占位符；真实 key 使
     lines.push(external ? (external.stale ? "慢慢买缓存历史；本次刷新失败，优惠条件待核。" : "历史来自慢慢买，优惠条件待核。") : "本地浏览记录，非完整历史。");
     if (finished) return;
     $notify("🛍️ Jev 购物分析", text(product.title, 36), lines.join("\n"));
-    if (action) $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 23, configAt }), cacheKey);
+    if (action) $prefs.setValueForKey(JSON.stringify({ identity, at: now, action, version: 24, configAt }), cacheKey);
   }
   run().catch(function () { console.log("Jev：本次分析失败，原样放行"); }).then(finish);
 })();
