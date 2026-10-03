@@ -15,3 +15,11 @@ Jev 未配置、请求失败或返回格式无效时，通知仍显示当前展�
 ### 京东详情编号独立触发
 
 参照 yichahucha、zZPiglet 的商品链接提取方式，兼容 floors、others.property.shareUrl 和 commonBaseInfo，以及 data 内的详情容器。取得明确商品编号后即使缺少价格，也进入独立历史查询；多个编号冲突不引用，价格冲突只保留历史查询。配置预加载模板和推荐商品不作为当前商品。当前账号到手价仍需实际详情响应支持，慢慢买参考价单独标记。HTTPDNS 配置保持原样。
+
+### 2026-10-03 浏览器脚本对照
+
+核对 [购物党](https://greasyfork.org/zh-CN/scripts/436876/code) 与 [购物优惠券小助手](https://greasyfork.org/zh-CN/scripts/497783/code) 源码：前者在网页环境通过 `acs.m.taobao.com/h5/mtop.taobao.detail.getdetail/6.0/` 获取商品信息，其列表辅助逻辑取 `apiStack[0].value` 内 `skuCore.sku2info["0"].price.priceMoney / 100`，失败则退回网页采集价；这不证明是当前所选规格或账号券后价。后者通过 `api2.jasonzk.com/tools/goods-his` 按商品链接查询第三方历史价格，使用浏览器 DOM 展示。两者均不能直接作为圈 X 原生 App 抓取方案。现有规则已覆盖前者的详情接口，未额外接入默认 SKU 价格、推广转换接口或第三方当前价，避免把参考价标成账号价。此对照不代表淘宝 App 抓取问题已修复。
+
+### 京东 PC 详情展示价补充
+
+参考购物党网页数据结构，新增 `pc_detailpage_wareBusiness` 响应解析：从 GET 查询或 POST 表单提取请求 SKU，核对响应的 `pageConfigVO.skuid` / `skuId`，仅取同一响应的 `price.finalPrice.price` 或 `price.p`，标记为京东网页展示价。原价 `op` 不作为当前价；错误响应、编号冲突、区间值不接受。规则原有 api.m.jd.com 覆盖该入口，无需新增主机。没有主动重放签名请求，未伪造 h5st，也未修复无法捕获原生 App 响应的问题。通过新字段、GET/POST、编号错配、接口错误、区间价及历史/淘宝回归检查；尚未在手机实测。
