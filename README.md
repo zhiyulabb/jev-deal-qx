@@ -53,3 +53,7 @@ Jev 未配置、请求失败或返回格式无效时，通知仍显示当前展�
 电脑圈 X 实际捕获 `pc_detailpage_wareBusiness`：商品 100018607635 的 `price.finalPrice.price` 为 11.75，`price.p` 为 15.00，现有解析回放正确取得11.75。价格对象的 `price.id` 也纳入商品校验。此结果不代表手机 App 接口已验证。
 
 订阅固定旧提交的 conf 无法自动获取新版；日常更新请使用 main 配置链接。发布的 conf 仍固定脚本提交，保证每版规则和脚本一致。更新后需在圈 X 中刷新引用；磁盘配置变更不等于运行中的配置已经重载。
+
+### 京东主机覆盖补充（v33）
+
+显式列出 api.m.jd.com、in.m.jd.com、item.m.jd.com、item.jd.com；这些原本已在 jd.com 通配覆盖内。参考购物党 vendor-gwdv2.js 的 jdRequest，新增 color.jkcsjd.com 解密主机及同结构商品 API 请求/响应规则，脚本平台识别同步扩展。只处理已识别商品接口，不把所有主机流量作为商品数据。新增主机未在手机实测；没有改变证书、HTTPDNS、代理分流或京东登录状态。
